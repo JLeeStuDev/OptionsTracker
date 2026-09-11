@@ -74,6 +74,7 @@
   .adj-tag.raise{background:#122a22;color:var(--green);}
   .adj-tag.tighten{background:#2a1414;color:var(--red);}
   .adj-tag.none{background:#1c2028;color:var(--muted);}
+  .adj-tag.info{background:#16202c;color:var(--accent);}
   .adj-text{color:var(--muted);font-size:13px;}
 
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
@@ -343,17 +344,30 @@ function render(){
   const latest = entries[entries.length-1];
   const latestEval = latest ? evaluate(pos, latest) : null;
   const adj = (entries.length && pos.status !== 'closed') ? computeAdjustment(pos, entries) : null;
+  const sim = simCache[pos.id];
+  const simIsCurrent = sim && !sim.error && latest && sim.runOnEntryKey === (latest.date + '|' + latest.time);
 
   if(pos.status === 'closed'){
     html += `<div class="banner hold"><div class="verdict">Position closed</div>
       <div class="detail">Reopen or start a new position above if you want to keep tracking.</div></div>`;
   } else if(latestEval){
+    const tpP = simIsCurrent ? priceFromPct(pos.entryPremium, sim.tp) : null;
+    const slP = simIsCurrent ? priceFromPct(pos.entryPremium, sim.sl) : null;
     html += `<div class="banner ${latestEval.cls}">
       <div class="verdict">${latestEval.verdict}</div>
       <div class="detail">${latestEval.detail}${latestEval.note ? ' · ' + latestEval.note : ''}</div>
       ${adj ? `<div class="adj-line">
         <span class="adj-tag ${adj.tag}">${adj.tag==='raise'?'Consider raising TP':adj.tag==='tighten'?'Consider tightening SL':'No change suggested'}</span>
         <span class="adj-text">${adj.text}</span>
+      </div>` : ''}
+      ${simIsCurrent ? `<div class="adj-line">
+        <span class="adj-tag info">Monte Carlo context</span>
+        <span class="adj-text">${fmt(sim.probProfit,0)}% odds of profit at day ${sim.horizonDays} (of ${sim.dte} to expiration), modeled range $${fmt(slP)}–$${fmt(tpP)}
+          at ${sim.band}% confidence using ${sim.volSourceLabel} (${fmt(sim.sigmaPct,1)}%). This is context, not a substitute
+          for the TP/SL rule above — see the Predictive Targets card for the full picture.</span>
+      </div>` : sim && !sim.error ? `<div class="adj-line">
+        <span class="adj-tag none">Monte Carlo context</span>
+        <span class="adj-text">Your last simulation is from an earlier checkpoint — re-run it in the Predictive Targets card below for a current read.</span>
       </div>` : ''}
     </div>`;
   } else {
@@ -540,6 +554,22 @@ function computeHistoricalVol(closes){
   return {annualizedPct, sampleSize: prices.length};
 }
 
+// Historical arrays are stored oldest-first (parseHistoricalCSV sorts ascending when
+// dates are present), so the most recent N entries are simply the last N in the array —
+// this keeps the volatility estimate reflecting recent behavior even if a full multi-year
+// history was uploaded.
+function trimHistorical(hist, lookbackDays){
+  const n = lookbackDays && lookbackDays > 0 ? lookbackDays : 60;
+  return hist.slice(-n);
+}
+
+async function updateHistLookback(posId, value){
+  const n = parseInt(value);
+  state.positions[posId].histLookbackDays = isNaN(n) || n < 6 ? 60 : n;
+  await savePositions();
+  render();
+}
+
 function handleHistFileUpload(posId){
   const input = document.getElementById('hist-file');
   const file = input.files && input.files[0];
@@ -569,13 +599,16 @@ async function clearHistoricalInput(posId){
   render();
 }
 
-// --- Monte Carlo simulation (GBM terminal distribution, percentile-based targets) ---
-// Uses the position's strike/side/expiration, the latest logged stock price and
-// implied volatility, and a risk-free rate assumption to simulate a range of
-// possible option outcomes at expiration, then reads TP/SL suggestions off the
-// resulting distribution. This is a probability model, not a direction forecast —
-// it assumes lognormal returns (standard GBM) and says nothing about news, earnings,
-// or gaps, which is why it's an input to your judgment, not a replacement for it.
+// --- Monte Carlo simulation (GBM price paths, Black-Scholes repricing at a chosen
+// evaluation horizon, percentile-based targets) ---
+// Uses the position's strike/side/expiration, the latest logged stock price and a
+// volatility input, plus a risk-free rate assumption, to simulate a range of possible
+// stock prices at a near-term horizon (not necessarily expiration), then reprices the
+// option at each simulated price with Black-Scholes so the distribution retains time
+// value instead of collapsing to a hard $0/large-payoff split. This is a probability
+// model, not a direction forecast — it assumes lognormal returns (standard GBM) and
+// says nothing about news, earnings, or gaps, which is why it's an input to your
+// judgment, not a replacement for it.
 function randn(){
   let u=0, v=0;
   while(u===0) u = Math.random();
@@ -591,11 +624,40 @@ function percentile(sortedArr, p){
   return sortedArr[lo] + (sortedArr[hi]-sortedArr[lo]) * (idx-lo);
 }
 
-function runMonteCarlo(S0, strike, side, dteDays, sigma, r, nPaths){
-  const T = dteDays/365;
-  const nSteps = Math.max(1, Math.min(dteDays, 60));
-  const dt = T/nSteps;
-  const payoffs = new Array(nPaths);
+// Standard normal CDF (Abramowitz & Stegun 7.1.26 approximation, ~7 decimal accuracy)
+function normCDF(x){
+  const sign = x < 0 ? -1 : 1;
+  const ax = Math.abs(x)/Math.SQRT2;
+  const a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429, p=0.3275911;
+  const t = 1/(1+p*ax);
+  const y = 1 - (((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-ax*ax);
+  return 0.5*(1+sign*y);
+}
+
+// Black-Scholes option value. T is the time (in years) remaining until the option's
+// actual expiration, evaluated at stock price S. When T<=0, this is just intrinsic value.
+function blackScholesPrice(S, K, T, sigma, r, side){
+  if(T <= 0 || sigma <= 0){
+    return side==='Call' ? Math.max(S-K,0) : Math.max(K-S,0);
+  }
+  const sqrtT = Math.sqrt(T);
+  const d1 = (Math.log(S/K) + (r + sigma*sigma/2)*T) / (sigma*sqrtT);
+  const d2 = d1 - sigma*sqrtT;
+  if(side === 'Call'){
+    return S*normCDF(d1) - K*Math.exp(-r*T)*normCDF(d2);
+  }
+  return K*Math.exp(-r*T)*normCDF(-d2) - S*normCDF(-d1);
+}
+
+// Simulates the stock forward `horizonDays` (GBM), then reprices the option at each
+// simulated price using Black-Scholes with `remainingDays` left until actual expiration.
+// horizonDays === full DTE (remainingDays=0) reproduces plain expiration-payoff behavior.
+function runMonteCarlo(S0, strike, side, horizonDays, remainingDays, sigma, r, nPaths){
+  const Thorizon = horizonDays/365;
+  const Tremaining = remainingDays/365;
+  const nSteps = Math.max(1, Math.min(horizonDays, 60));
+  const dt = Thorizon/nSteps;
+  const values = new Array(nPaths);
   const samplePaths = [];
   const sampleCount = Math.min(25, nPaths);
   for(let p=0; p<nPaths; p++){
@@ -608,34 +670,37 @@ function runMonteCarlo(S0, strike, side, dteDays, sigma, r, nPaths){
       if(storeThis) path.push(S);
     }
     if(storeThis) samplePaths.push(path);
-    payoffs[p] = side === 'Call' ? Math.max(S - strike, 0) : Math.max(strike - S, 0);
+    values[p] = blackScholesPrice(S, strike, Tremaining, sigma, r, side);
   }
-  return {payoffs, samplePaths, nSteps};
+  return {values, samplePaths, nSteps};
 }
 
-function computePredictiveTargets(pos, entry, confidenceBand, rfRatePct, nPaths, sigmaPctOverride){
+function computePredictiveTargets(pos, entry, confidenceBand, rfRatePct, nPaths, sigmaPctOverride, horizonDaysOverride){
   const sigmaPct = sigmaPctOverride != null ? sigmaPctOverride : entry.iv;
   if(entry.stockPrice == null || sigmaPct == null) return {error:'missing-inputs'};
   const dte = daysBetween(entry.date, pos.expiration);
   if(dte <= 0) return {error:'expired'};
 
+  const horizonDays = Math.max(1, Math.min(horizonDaysOverride || dte, dte));
+  const remainingDays = dte - horizonDays;
   const sigma = sigmaPct/100;
   const r = rfRatePct/100;
-  const {payoffs, samplePaths} = runMonteCarlo(entry.stockPrice, pos.strike, pos.side, dte, sigma, r, nPaths);
-  const pctPayoffs = payoffs
+  const {values, samplePaths} = runMonteCarlo(entry.stockPrice, pos.strike, pos.side, horizonDays, remainingDays, sigma, r, nPaths);
+  const pctValues = values
     .map(v => ((v - pos.entryPremium)/pos.entryPremium)*100)
     .sort((a,b)=>a-b);
 
   const lowP = (100-confidenceBand)/2;
   const highP = 100 - lowP;
-  const slRaw = percentile(pctPayoffs, lowP);
-  const tp = percentile(pctPayoffs, highP);
+  const slRaw = percentile(pctValues, lowP);
+  const tp = percentile(pctValues, highP);
   const sl = Math.max(slRaw, -100); // can't lose more than the premium paid
-  const median = percentile(pctPayoffs, 50);
-  const mean = pctPayoffs.reduce((a,b)=>a+b,0)/pctPayoffs.length;
-  const probProfit = (pctPayoffs.filter(v=>v>0).length/pctPayoffs.length)*100;
+  const median = percentile(pctValues, 50);
+  const mean = pctValues.reduce((a,b)=>a+b,0)/pctValues.length;
+  const probProfit = (pctValues.filter(v=>v>0).length/pctValues.length)*100;
 
-  return {tp, sl, median, mean, probProfit, dte, sigmaPct: sigma*100, pctPayoffs, samplePaths, S0: entry.stockPrice};
+  return {tp, sl, median, mean, probProfit, dte, horizonDays, remainingDays,
+    sigmaPct: sigma*100, pctPayoffs: pctValues, samplePaths, S0: entry.stockPrice};
 }
 
 let simCache = {}; // posId -> last computed sim result, transient (not persisted)
@@ -648,8 +713,9 @@ async function runSimulation(posId){
   const band = parseInt(document.getElementById('sim-band').value);
   const rf = parseFloat(document.getElementById('sim-rf').value);
   const volSource = document.getElementById('sim-vol-source').value;
+  const horizonInput = parseInt(document.getElementById('sim-horizon').value);
 
-  const hv = computeHistoricalVol(state.historical[posId] || []);
+  const hv = computeHistoricalVol(trimHistorical(state.historical[posId] || [], pos.histLookbackDays));
   let sigmaPct = null;
   if(volSource === 'iv'){
     sigmaPct = latest.iv;
@@ -662,7 +728,12 @@ async function runSimulation(posId){
     else sigmaPct = latest.iv != null ? latest.iv : hv.annualizedPct;
   }
 
-  const result = computePredictiveTargets(pos, latest, band, isNaN(rf)?4.5:rf, 3000, sigmaPct);
+  const result = computePredictiveTargets(pos, latest, band, isNaN(rf)?4.5:rf, 3000, sigmaPct, horizonInput);
+  if(!result.error){
+    result.band = band;
+    result.volSourceLabel = volSource==='iv' ? 'implied vol' : volSource==='hv' ? 'historical vol' : 'blended vol';
+    result.runOnEntryKey = latest.date + '|' + latest.time; // which checkpoint this sim reflects
+  }
   simCache[posId] = result;
   render();
 }
@@ -800,7 +871,11 @@ function renderPredictiveCard(pos, entries){
   const latest = entries[entries.length-1];
   const result = simCache[pos.id];
   const hist = state.historical[pos.id] || [];
-  const hv = computeHistoricalVol(hist);
+  const lookback = pos.histLookbackDays || 60;
+  const trimmedHist = trimHistorical(hist, lookback);
+  const hv = computeHistoricalVol(trimmedHist);
+  const dtePreview = latest ? daysBetween(latest.date, pos.expiration) : null;
+  const defaultHorizon = dtePreview && dtePreview > 0 ? Math.max(1, Math.min(14, dtePreview)) : 14;
 
   let body = '';
   if(!latest || latest.stockPrice == null){
@@ -811,6 +886,9 @@ function renderPredictiveCard(pos, entries){
     const ivOpt = latest.iv != null;
     const hvOpt = !!hv;
     body += `<div class="row3">
+      <div class="field"><label>Evaluation horizon (days)</label>
+        <input type="number" step="1" min="1" max="${dtePreview||365}" id="sim-horizon" value="${defaultHorizon}">
+      </div>
       <div class="field"><label>Confidence band</label>
         <select id="sim-band">
           <option value="90">90%</option>
@@ -826,7 +904,14 @@ function renderPredictiveCard(pos, entries){
           <option value="blend" ${!ivOpt||!hvOpt?'disabled':''}>Blend of both</option>
         </select>
       </div>
+    </div>
+    <div class="row3">
       <div class="field"><label>Risk-free rate %</label><input type="number" step="0.1" id="sim-rf" value="4.5"></div>
+    </div>
+    <div class="adj-text" style="margin-bottom:10px;">
+      Horizon = how many days out to evaluate, not necessarily expiration. A shorter horizon (e.g. 14 days) reprices
+      the option with remaining time value still in it, matching closing early rather than holding to expiration —
+      set it equal to the days-to-expiration to get plain hold-to-expiration payoffs instead.
     </div>
     <button class="primary" onclick="runSimulation('${pos.id}')">Run simulation</button>`;
 
@@ -845,27 +930,36 @@ function renderPredictiveCard(pos, entries){
             <div style="color:var(--muted);font-size:12px;">${result.tp>=0?'+':''}${fmt(result.tp,1)}% from entry</div></div>
           <div><label>Move SL to</label><div class="pnl-neg" style="font-size:18px;font-weight:600;padding:4px 0;">$${fmt(slPrice)}</div>
             <div style="color:var(--muted);font-size:12px;">${fmt(result.sl,1)}% from entry</div></div>
-          <div><label>Odds of any profit at expiration</label><div style="font-size:18px;font-weight:600;padding:4px 0;">${fmt(result.probProfit,0)}%</div></div>
+          <div><label>Odds of profit at day ${result.horizonDays}</label><div style="font-size:18px;font-weight:600;padding:4px 0;">${fmt(result.probProfit,0)}%</div></div>
         </div>
         <div class="row3">
           <div><label>Median outcome price</label><div style="padding:4px 0;color:var(--muted);">$${fmt(priceFromPct(pos.entryPremium, result.median))}</div></div>
-          <div><label>Days to expiration used</label><div style="padding:4px 0;color:var(--muted);">${result.dte}</div></div>
+          <div><label>Horizon / DTE used</label><div style="padding:4px 0;color:var(--muted);">${result.horizonDays}d of ${result.dte}d</div></div>
           <div><label>Volatility used</label><div style="padding:4px 0;color:var(--muted);">${fmt(result.sigmaPct,1)}%</div></div>
         </div>
         <canvas id="sim-hist" style="margin-top:8px;"></canvas>
         <button class="ghost" style="margin-top:8px;" onclick="applySuggestedTargets('${pos.id}')">Apply — move TP to $${fmt(tpPrice)}, SL to $${fmt(slPrice)}</button>
         <div class="adj-text" style="margin-top:10px;">
-          Based on ${3000} simulated price paths assuming lognormal (Brownian motion) returns at ${fmt(result.sigmaPct,1)}% volatility —
-          the same assumption behind Black-Scholes. It doesn't account for earnings surprises, news, or gaps.
-          Treat it as a probability-informed range, not a forecast.
+          ${result.remainingDays > 0
+            ? `Prices simulated at day ${result.horizonDays} using Black-Scholes with ${result.remainingDays} days of time value still remaining — smoother than a raw expiration payoff.`
+            : `Horizon equals days-to-expiration, so this reflects plain hold-to-expiration payoffs (no time value left at that point).`}
+          Based on ${3000} simulated price paths assuming lognormal (Brownian motion) returns at ${fmt(result.sigmaPct,1)}% volatility.
+          It doesn't account for earnings surprises, news, or gaps. Treat it as a probability-informed range, not a forecast.
         </div>`;
     }
   }
 
   body += `<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
     <label>Historical closes for the underlying (optional — improves the volatility estimate)</label>
-    <div class="field" style="margin-bottom:8px;">
-      <input type="file" id="hist-file" accept=".csv,text/csv" onchange="handleHistFileUpload('${pos.id}')">
+    <div class="row3" style="margin-bottom:8px;">
+      <div class="field" style="grid-column: span 2;">
+        <input type="file" id="hist-file" accept=".csv,text/csv" onchange="handleHistFileUpload('${pos.id}')">
+      </div>
+      <div class="field">
+        <label style="margin-bottom:2px;">Use most recent (days)</label>
+        <input type="number" step="1" min="6" value="${lookback}"
+          onchange="updateHistLookback('${pos.id}', this.value)">
+      </div>
     </div>
     <textarea id="hist-input" rows="4" style="width:100%;background:var(--card-2);border:1px solid var(--border);
       color:var(--text);border-radius:7px;padding:8px 10px;font-size:12.5px;font-family:monospace;resize:vertical;"
@@ -875,9 +969,9 @@ function renderPredictiveCard(pos, entries){
       ${hist.length ? `<button class="ghost danger" onclick="clearHistoricalInput('${pos.id}')">Clear</button>` : ''}
     </div>
     <div class="adj-text" style="margin-top:6px;">
-      ${hv ? `Computed from ${hv.sampleSize} closes: ${fmt(hv.annualizedPct,1)}% annualized historical volatility.`
-           : hist.length ? `Need at least 6 valid closes to compute a volatility estimate (currently have ${hist.length}).`
-           : `Upload a CSV (handles typical exports with a Date and Close/Adj Close column), or paste "date,close" rows manually — 20–90 trading days is a reasonable range. Review what lands in the box, then hit Save.`}
+      ${hv ? `Using the most recent ${trimmedHist.length} of ${hist.length} uploaded closes: ${fmt(hv.annualizedPct,1)}% annualized historical volatility.`
+           : hist.length ? `Need at least 6 valid closes in the lookback window to compute a volatility estimate (currently have ${trimmedHist.length} of ${hist.length} uploaded).`
+           : `Upload a CSV — a full multi-year history is fine, it'll automatically use just the lookback window above for the actual volatility read. Handles typical exports with a Date and Close/Adj Close column, or paste "date,close" rows manually.`}
     </div>
   </div>`;
 
