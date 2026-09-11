@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Position Log</title>
+<style>
+  :root{
+    --bg:#12151a;
+    --card:#1a1e26;
+    --card-2:#20252f;
+    --border:#2c313d;
+    --text:#e7e9ee;
+    --muted:#8b91a1;
+    --accent:#5b8def;
+    --green:#3ddc97;
+    --red:#ff6b6b;
+    --amber:#f0a83c;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    font-size:14px;
+    line-height:1.5;
+    padding:20px;
+  }
+  .wrap{max-width:920px;margin:0 auto;}
+  h1{font-size:19px;font-weight:600;margin:0 0 2px;}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 20px;}
+
+  .positions-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;}
+  .pos-chip{
+    padding:7px 12px;border-radius:8px;border:1px solid var(--border);
+    background:var(--card);cursor:pointer;font-size:13px;color:var(--muted);
+  }
+  .pos-chip.active{border-color:var(--accent);color:var(--text);background:var(--card-2);}
+  .pos-chip .dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:6px;}
+  .btn-new{
+    padding:7px 12px;border-radius:8px;border:1px dashed var(--border);
+    background:transparent;color:var(--muted);cursor:pointer;font-size:13px;
+  }
+
+  .card{
+    background:var(--card);border:1px solid var(--border);border-radius:10px;
+    padding:16px 18px;margin-bottom:16px;
+  }
+  .card h2{font-size:13px;font-weight:600;margin:0 0 12px;color:var(--muted);}
+
+  .banner{
+    border-radius:10px;padding:16px 18px;margin-bottom:16px;
+    border:1px solid var(--border);
+  }
+  .banner .verdict{font-size:16px;font-weight:600;margin-bottom:4px;}
+  .banner .detail{color:var(--muted);font-size:13px;}
+  .banner.hold{border-color:#33465f;background:#16202c;}
+  .banner.hold .verdict{color:var(--accent);}
+  .banner.close-win{border-color:#245c48;background:#122a22;}
+  .banner.close-win .verdict{color:var(--green);}
+  .banner.close-loss{border-color:#5c2b2b;background:#2a1414;}
+  .banner.close-loss .verdict{color:var(--red);}
+  .banner.caution{border-color:#5c4c22;background:#2a2312;}
+  .banner.caution .verdict{color:var(--amber);}
+
+  .adj-line{
+    margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08);
+    display:flex;gap:8px;align-items:flex-start;
+  }
+  .adj-tag{
+    flex-shrink:0;font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;
+    white-space:nowrap;
+  }
+  .adj-tag.raise{background:#122a22;color:var(--green);}
+  .adj-tag.tighten{background:#2a1414;color:var(--red);}
+  .adj-tag.none{background:#1c2028;color:var(--muted);}
+  .adj-text{color:var(--muted);font-size:13px;}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  @media (max-width:680px){.grid2{grid-template-columns:1fr;}}
+
+  label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px;}
+  .field{margin-bottom:10px;}
+  input,select{
+    width:100%;background:var(--card-2);border:1px solid var(--border);
+    color:var(--text);border-radius:7px;padding:8px 10px;font-size:13px;
+    font-variant-numeric:tabular-nums;
+  }
+  input:focus,select:focus{outline:none;border-color:var(--accent);}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;}
+
+  button.primary{
+    background:var(--accent);color:#0d1117;border:none;border-radius:7px;
+    padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer;margin-top:6px;
+  }
+  button.primary:hover{opacity:0.9;}
+  button.ghost{
+    background:transparent;color:var(--muted);border:1px solid var(--border);
+    border-radius:7px;padding:9px 14px;font-size:13px;cursor:pointer;
+  }
+  button.danger{color:var(--red);border-color:#5c2b2b;}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  th{
+    text-align:left;color:var(--muted);font-weight:500;padding:6px 8px;
+    border-bottom:1px solid var(--border);white-space:nowrap;
+  }
+  td{padding:7px 8px;border-bottom:1px solid var(--border);white-space:nowrap;
+    font-variant-numeric:tabular-nums;}
+  tr:last-child td{border-bottom:none;}
+  .tbl-wrap{overflow-x:auto;}
+  .pnl-pos{color:var(--green);}
+  .pnl-neg{color:var(--red);}
+  .tag{
+    font-size:11px;padding:2px 7px;border-radius:5px;font-weight:600;
+  }
+  .tag.hold{background:#16202c;color:var(--accent);}
+  .tag.win{background:#122a22;color:var(--green);}
+  .tag.loss{background:#2a1414;color:var(--red);}
+  .tag.caution{background:#2a2312;color:var(--amber);}
+  .empty{color:var(--muted);text-align:center;padding:24px 0;font-size:13px;}
+
+  canvas{width:100%;height:140px;display:block;}
+
+  .foot-actions{display:flex;gap:8px;margin-top:4px;}
+  .del-x{cursor:pointer;color:var(--muted);}
+  .del-x:hover{color:var(--red);}
+  .status-closed{color:var(--muted);font-size:12px;margin-bottom:10px;}
+  .loading{color:var(--muted);font-size:13px;padding:20px;text-align:center;}
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="loading">Loading...</div>
+</div>
+
+<script>
+const S = window.storage;
+const TIME_SLOTS = ['10:30 AM', '12:00 PM', '3:30 PM'];
+function timeOrder(t){ const i = TIME_SLOTS.indexOf(t); return i===-1 ? 99 : i; }
+function sortEntries(list){
+  return list.slice().sort((a,b)=>{
+    if(a.date !== b.date) return a.date < b.date ? -1 : 1;
+    return timeOrder(a.time) - timeOrder(b.time);
+  });
+}
+let state = {
+  positions: {},      // id -> {ticker, side, strike, expiration, entryDate, entryPremium, contracts, tpPct, slPct, status, closedEntry}
+  activeId: null,
+  entries: {},         // positionId -> [ {date, stockPrice, bid, ask, iv, delta, notes} ]
+  historical: {}        // positionId -> [ {date, close} ]  (pasted-in daily closes for the underlying)
+};
+
+function uid(){ return 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+function todayStr(){ return new Date().toISOString().slice(0,10); }
+function fmt(n, d=2){ return (n===null||n===undefined||isNaN(n)) ? '—' : Number(n).toFixed(d); }
+function priceFromPct(entryPremium, pct){
+  const p = entryPremium * (1 + pct/100);
+  return Math.max(p, 0); // an option's price can't go negative
+}
+function daysBetween(a,b){ return Math.round((new Date(b) - new Date(a)) / 86400000); }
+
+async function loadState(){
+  try{
+    const posRes = await S.get('positions', false);
+    if(posRes && posRes.value) state.positions = JSON.parse(posRes.value);
+  }catch(e){ /* no positions yet */ }
+  try{
+    const activeRes = await S.get('activeId', false);
+    if(activeRes && activeRes.value) state.activeId = activeRes.value;
+  }catch(e){}
+  const ids = Object.keys(state.positions);
+  if(!state.activeId || !state.positions[state.activeId]) state.activeId = ids[0] || null;
+  for(const id of ids){
+    try{
+      const eRes = await S.get('entries:' + id, false);
+      state.entries[id] = eRes && eRes.value ? JSON.parse(eRes.value) : [];
+    }catch(e){ state.entries[id] = []; }
+    try{
+      const hRes = await S.get('historical:' + id, false);
+      state.historical[id] = hRes && hRes.value ? JSON.parse(hRes.value) : [];
+    }catch(e){ state.historical[id] = []; }
+  }
+  render();
+}
+
+async function savePositions(){
+  try{ await S.set('positions', JSON.stringify(state.positions), false); }
+  catch(e){ console.error('save positions failed', e); }
+}
+async function saveActiveId(){
+  try{ await S.set('activeId', state.activeId || '', false); }
+  catch(e){ console.error('save active failed', e); }
+}
+async function saveEntries(id){
+  try{ await S.set('entries:' + id, JSON.stringify(state.entries[id] || []), false); }
+  catch(e){ console.error('save entries failed', e); }
+}
+async function saveHistorical(id){
+  try{ await S.set('historical:' + id, JSON.stringify(state.historical[id] || []), false); }
+  catch(e){ console.error('save historical failed', e); }
+}
+
+function computeMark(bid, ask){
+  if(bid==null && ask==null) return null;
+  if(bid==null) return ask;
+  if(ask==null) return bid;
+  return (Number(bid) + Number(ask)) / 2;
+}
+
+function evaluate(pos, entry){
+  const mark = computeMark(entry.bid, entry.ask);
+  const entryPrem = pos.entryPremium;
+  const pnlPct = (mark!=null && entryPrem) ? ((mark - entryPrem) / entryPrem) * 100 : null;
+  const dte = daysBetween(entry.date, pos.expiration);
+  let verdict, cls, tagCls, detail;
+
+  const tpPrice = priceFromPct(entryPrem, pos.tpPct);
+  const slPrice = priceFromPct(entryPrem, pos.slPct);
+
+  if(pnlPct!=null && pnlPct >= pos.tpPct){
+    verdict = 'Close — take-profit target reached';
+    cls = 'close-win'; tagCls='win';
+    detail = `At $${fmt(mark)}, up ${fmt(pnlPct,1)}% — at or past your $${fmt(tpPrice)} target.`;
+  } else if(pnlPct!=null && pnlPct <= pos.slPct){
+    verdict = 'Close — stop-loss triggered';
+    cls = 'close-loss'; tagCls='loss';
+    detail = `At $${fmt(mark)}, down ${fmt(pnlPct,1)}% — at or past your $${fmt(slPrice)} stop.`;
+  } else if(dte <= 10){
+    verdict = 'Close / reassess — very close to expiration';
+    cls = 'close-loss'; tagCls='caution';
+    detail = `${dte} days to expiration, currently $${fmt(mark)}. Theta decay is steepest here regardless of P&L.`;
+  } else if(dte <= 21){
+    verdict = 'Caution — entering the fast time-decay window';
+    cls = 'caution'; tagCls='caution';
+    detail = `${dte} days to expiration, currently $${fmt(mark)} (target $${fmt(tpPrice)} / stop $${fmt(slPrice)}). No exit trigger yet, but check this daily from here.`;
+  } else {
+    verdict = 'Hold — within plan, no exit trigger';
+    cls = 'hold'; tagCls='hold';
+    detail = `${dte} days to expiration, currently $${fmt(mark)} (target $${fmt(tpPrice)} / stop $${fmt(slPrice)}). Sticking to the plan.`;
+  }
+
+  const spread = (entry.bid!=null && entry.ask!=null) ? (entry.ask - entry.bid) : null;
+  const spreadPct = (spread!=null && mark) ? (spread/mark)*100 : null;
+  let note = null;
+  if(spreadPct!=null && spreadPct > 15){
+    note = `Wide bid/ask spread (${fmt(spreadPct,0)}% of mark) — use a limit order, not market, if you act on this.`;
+  }
+  return {mark, pnlPct, dte, verdict, cls, tagCls, detail, note};
+}
+
+// Heuristic read on recent momentum in the logged data — not a prediction,
+// just a nudge based on how the last few checkpoints have been trending.
+function computeAdjustment(pos, sortedEntries){
+  const pts = sortedEntries
+    .map(e => ({...e, pnlPct: evaluate(pos, e).pnlPct}))
+    .filter(e => e.pnlPct != null);
+
+  if(pts.length < 2){
+    return {tag:'none', text:'Not enough checkpoints yet to read a trend — need at least two logged entries.'};
+  }
+
+  const recent = pts.slice(-4); // up to last 4 checkpoints, roughly the last day or so
+  const first = recent[0].pnlPct;
+  const last = recent[recent.length-1].pnlPct;
+  const steps = recent.length - 1;
+  const slope = steps > 0 ? (last - first) / steps : 0;
+
+  const tpPct = pos.tpPct;
+  const slPct = pos.slPct; // negative
+  const progressToTP = tpPct ? last / tpPct : 0;       // 0..1+ as it nears/passes TP
+  const progressToSL = slPct ? last / slPct : 0;        // 0..1+ as it nears/passes SL (both negative → positive ratio)
+
+  if(last >= 0 && progressToTP >= 0.5 && slope > 2){
+    return {
+      tag:'raise',
+      text:`Trending up and already ${fmt(progressToTP*100,0)}% of the way to your take-profit, with momentum still building (~${fmt(slope,1)} pts/checkpoint). Worth considering a trailing stop or a higher TP instead of closing right at the original target, if you want to let it keep running.`
+    };
+  }
+  if(last < 0 && progressToSL >= 0.5 && slope < -2){
+    return {
+      tag:'tighten',
+      text:`Trending down and already ${fmt(progressToSL*100,0)}% of the way to your stop-loss, with the decline accelerating (~${fmt(slope,1)} pts/checkpoint). Worth considering cutting a bit earlier rather than riding it all the way to the original stop.`
+    };
+  }
+  if(Math.abs(slope) < 1){
+    return {tag:'none', text:'Premium has been roughly flat across recent checkpoints — no clear momentum either way, original plan still looks fine.'};
+  }
+  return {tag:'none', text:'No strong enough trend yet to suggest changing your plan — sticking with your original TP/SL.'};
+}
+
+function render(){
+  const app = document.getElementById('app');
+  const ids = Object.keys(state.positions);
+
+  let html = `
+    <h1>Position Log</h1>
+    <p class="sub">Log the day's numbers for one option position and get a read on whether to close it or keep waiting.</p>
+    <div class="positions-row">`;
+
+  for(const id of ids){
+    const p = state.positions[id];
+    const dotColor = p.status === 'closed' ? '#5b6270' : 'var(--accent)';
+    html += `<div class="pos-chip ${id===state.activeId?'active':''}" onclick="selectPosition('${id}')">
+      <span class="dot" style="background:${dotColor}"></span>${p.ticker || 'Untitled'} ${p.strike?('$'+p.strike):''} ${p.side||''}
+    </div>`;
+  }
+  html += `<div class="btn-new" onclick="newPosition()">+ New position</div></div>`;
+
+  const pos = state.activeId ? state.positions[state.activeId] : null;
+
+  if(!pos){
+    html += renderSetupForm(null);
+    app.innerHTML = html;
+    return;
+  }
+
+  const entries = sortEntries(state.entries[pos.id] || []);
+  const latest = entries[entries.length-1];
+  const latestEval = latest ? evaluate(pos, latest) : null;
+  const adj = (entries.length && pos.status !== 'closed') ? computeAdjustment(pos, entries) : null;
+
+  if(pos.status === 'closed'){
+    html += `<div class="banner hold"><div class="verdict">Position closed</div>
+      <div class="detail">Reopen or start a new position above if you want to keep tracking.</div></div>`;
+  } else if(latestEval){
+    html += `<div class="banner ${latestEval.cls}">
+      <div class="verdict">${latestEval.verdict}</div>
+      <div class="detail">${latestEval.detail}${latestEval.note ? ' · ' + latestEval.note : ''}</div>
+      ${adj ? `<div class="adj-line">
+        <span class="adj-tag ${adj.tag}">${adj.tag==='raise'?'Consider raising TP':adj.tag==='tighten'?'Consider tightening SL':'No change suggested'}</span>
+        <span class="adj-text">${adj.text}</span>
+      </div>` : ''}
+    </div>`;
+  } else {
+    html += `<div class="banner hold"><div class="verdict">No entries yet</div>
+      <div class="detail">Add today's numbers below to get a read.</div></div>`;
+  }
+
+  html += `<div class="card">
+    <h2>Position</h2>
+    <div class="row3">
+      <div><label>Ticker</label><div style="padding:8px 0;">${pos.ticker}</div></div>
+      <div><label>Contract</label><div style="padding:8px 0;">${pos.side} $${pos.strike} exp ${pos.expiration}</div></div>
+      <div><label>Entry premium (mark)</label><div style="padding:8px 0;">$${fmt(pos.entryPremium)} × ${pos.contracts} contract(s)</div></div>
+    </div>
+    <div class="row3">
+      <div><label>Entry date</label><div style="padding:8px 0;">${pos.entryDate}</div></div>
+      <div><label>Take-profit target</label><div style="padding:8px 0;">$${fmt(priceFromPct(pos.entryPremium, pos.tpPct))} <span style="color:var(--muted);font-size:12px;">(+${pos.tpPct}%)</span></div></div>
+      <div><label>Stop-loss</label><div style="padding:8px 0;">$${fmt(priceFromPct(pos.entryPremium, pos.slPct))} <span style="color:var(--muted);font-size:12px;">(${pos.slPct}%)</span></div></div>
+    </div>
+    <div class="foot-actions">
+      <button class="ghost" onclick="editPosition('${pos.id}')">Edit position</button>
+      ${pos.status==='closed'
+        ? `<button class="ghost" onclick="reopenPosition('${pos.id}')">Reopen</button>`
+        : `<button class="ghost" onclick="closePosition('${pos.id}')">Mark closed</button>`}
+      <button class="ghost danger" onclick="deletePosition('${pos.id}')">Delete position</button>
+    </div>
+  </div>`;
+
+  if(pos.status !== 'closed'){
+    html += renderPredictiveCard(pos, entries);
+  }
+
+  if(pos.status !== 'closed'){
+    html += `<div class="card">
+      <h2>Add today's numbers</h2>
+      <div class="row3">
+        <div class="field"><label>Date</label><input type="date" id="in-date" value="${todayStr()}"></div>
+        <div class="field"><label>Checkpoint</label>
+          <select id="in-time">
+            ${TIME_SLOTS.map(t=>`<option value="${t}">${t} ET</option>`).join('')}
+          </select>
+        </div>
+        <div class="field"><label>Stock price</label><input type="number" step="0.01" id="in-stock" placeholder="e.g. 5.57"></div>
+      </div>
+      <div class="row3">
+        <div class="field"><label>Option bid</label><input type="number" step="0.01" id="in-bid" placeholder="e.g. 0.28"></div>
+        <div class="field"><label>Option ask</label><input type="number" step="0.01" id="in-ask" placeholder="e.g. 0.30"></div>
+        <div class="field"><label>Implied vol %</label><input type="number" step="0.1" id="in-iv" placeholder="optional"></div>
+      </div>
+      <div class="row3">
+        <div class="field"><label>Delta</label><input type="number" step="0.01" id="in-delta" placeholder="optional"></div>
+      </div>
+      <div class="field"><label>Notes (optional)</label><input type="text" id="in-notes" placeholder="anything worth remembering about today"></div>
+      <button class="primary" onclick="addEntry()">Add entry</button>
+    </div>`;
+  }
+
+  html += `<div class="card">
+    <h2>Premium over time</h2>
+    ${entries.length ? '<canvas id="chart"></canvas>' : '<div class="empty">No entries logged yet.</div>'}
+  </div>`;
+
+  html += `<div class="card">
+    <h2>History</h2>`;
+  if(entries.length === 0){
+    html += `<div class="empty">Nothing logged yet — add your first entry above.</div>`;
+  } else {
+    html += `<div class="tbl-wrap"><table><thead><tr>
+      <th>Date</th><th>Time</th><th>Stock</th><th>Bid</th><th>Ask</th><th>Mark</th>
+      <th>P&L</th><th>DTE</th><th>IV</th><th>Δ</th><th>Read</th><th></th>
+    </tr></thead><tbody>`;
+    for(let i=entries.length-1;i>=0;i--){
+      const e = entries[i];
+      const ev = evaluate(pos, e);
+      const pnlClass = ev.pnlPct==null ? '' : (ev.pnlPct>=0 ? 'pnl-pos':'pnl-neg');
+      html += `<tr>
+        <td>${e.date}</td>
+        <td>${e.time || '—'}</td>
+        <td>${e.stockPrice!=null ? '$'+fmt(e.stockPrice) : '—'}</td>
+        <td>${e.bid!=null ? '$'+fmt(e.bid) : '—'}</td>
+        <td>${e.ask!=null ? '$'+fmt(e.ask) : '—'}</td>
+        <td>${ev.mark!=null ? '$'+fmt(ev.mark) : '—'}</td>
+        <td class="${pnlClass}">${ev.pnlPct!=null ? (ev.pnlPct>=0?'+':'')+fmt(ev.pnlPct,1)+'%' : '—'}</td>
+        <td>${ev.dte}</td>
+        <td>${e.iv!=null ? fmt(e.iv,1)+'%' : '—'}</td>
+        <td>${e.delta!=null ? fmt(e.delta,2) : '—'}</td>
+        <td><span class="tag ${ev.tagCls}">${ev.tagCls==='hold'?'Hold':ev.tagCls==='win'?'TP':ev.tagCls==='loss'?'SL/DTE':'Watch'}</span></td>
+        <td><span class="del-x" onclick="deleteEntry('${pos.id}', ${i})" title="Delete entry">✕</span></td>
+      </tr>`;
+    }
+    html += `</tbody></table></div>`;
+  }
+  html += `</div>`;
+
+  app.innerHTML = html;
+  if(entries.length) drawChart(pos, entries);
+  if(simCache[pos.id] && !simCache[pos.id].error) drawHistogram(pos, simCache[pos.id]);
+}
+
+function renderSetupForm(existing){
+  const p = existing || {};
+  return `<div class="card">
+    <h2>${existing ? 'Edit position' : 'Set up a position to track'}</h2>
+    <div class="row3">
+      <div class="field"><label>Ticker</label><input id="s-ticker" value="${p.ticker||''}" placeholder="e.g. NAT"></div>
+      <div class="field"><label>Side</label>
+        <select id="s-side">
+          <option value="Call" ${p.side==='Call'?'selected':''}>Call</option>
+          <option value="Put" ${p.side==='Put'?'selected':''}>Put</option>
+        </select>
+      </div>
+      <div class="field"><label>Strike</label><input type="number" step="0.5" id="s-strike" value="${p.strike||''}" placeholder="e.g. 7"></div>
+    </div>
+    <div class="row3">
+      <div class="field"><label>Expiration date</label><input type="date" id="s-exp" value="${p.expiration||''}"></div>
+      <div class="field"><label>Entry date</label><input type="date" id="s-entrydate" value="${p.entryDate||todayStr()}"></div>
+      <div class="field"><label>Contracts</label><input type="number" step="1" id="s-contracts" value="${p.contracts||1}"></div>
+    </div>
+    <div class="row3">
+      <div class="field"><label>Entry premium (mark, $/share)</label><input type="number" step="0.01" id="s-premium" value="${p.entryPremium||''}" placeholder="e.g. 0.29"></div>
+      <div class="field"><label>Take-profit target (%)</label><input type="number" step="1" id="s-tp" value="${p.tpPct||60}"></div>
+      <div class="field"><label>Stop-loss (%, negative)</label><input type="number" step="1" id="s-sl" value="${p.slPct||-35}"></div>
+    </div>
+    <button class="primary" onclick="savePosition(${existing?`'${p.id}'`:'null'})">${existing?'Save changes':'Start tracking'}</button>
+    ${existing ? `<button class="ghost" style="margin-left:8px;" onclick="cancelEdit()">Cancel</button>` : ''}
+  </div>`;
+}
+
+// --- Historical volatility (optional cross-check against logged IV) ---
+// Expects pasted lines of "date,close" (or just closes, one per line, oldest first
+// or newest first — order is auto-detected by date). Computes annualized volatility
+// from the standard deviation of daily log returns.
+function parseHistoricalCSV(text){
+  const rows = [];
+  const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l.length);
+  for(const line of lines){
+    const parts = line.split(',').map(s=>s.trim());
+    let date, close;
+    if(parts.length >= 2){
+      date = parts[0].replace(/"/g,'');
+      close = parseFloat(parts[1].replace(/[^0-9.\-]/g,''));
+    } else {
+      close = parseFloat(parts[0].replace(/[^0-9.\-]/g,''));
+      date = null;
+    }
+    if(!isNaN(close)) rows.push({date, close});
+  }
+  // if dates are present and parseable, sort ascending by date; otherwise keep input order
+  const allDated = rows.every(r => r.date && !isNaN(new Date(r.date)));
+  if(allDated) rows.sort((a,b)=> new Date(a.date) - new Date(b.date));
+  return rows;
+}
+
+function computeHistoricalVol(closes){
+  const prices = closes.map(r=>r.close).filter(v=>v>0);
+  if(prices.length < 6) return null; // need a reasonable minimum sample
+  const logReturns = [];
+  for(let i=1;i<prices.length;i++){
+    logReturns.push(Math.log(prices[i]/prices[i-1]));
+  }
+  const mean = logReturns.reduce((a,b)=>a+b,0)/logReturns.length;
+  const variance = logReturns.reduce((a,b)=>a+(b-mean)*(b-mean),0)/(logReturns.length-1);
+  const dailyStdev = Math.sqrt(variance);
+  const annualizedPct = dailyStdev * Math.sqrt(252) * 100;
+  return {annualizedPct, sampleSize: prices.length};
+}
+
+async function saveHistoricalInput(posId){
+  const text = document.getElementById('hist-input').value;
+  const parsed = parseHistoricalCSV(text);
+  state.historical[posId] = parsed;
+  simCache[posId] = null;
+  await saveHistorical(posId);
+  render();
+}
+
+async function clearHistoricalInput(posId){
+  state.historical[posId] = [];
+  simCache[posId] = null;
+  await saveHistorical(posId);
+  render();
+}
+
+// --- Monte Carlo simulation (GBM terminal distribution, percentile-based targets) ---
+// Uses the position's strike/side/expiration, the latest logged stock price and
+// implied volatility, and a risk-free rate assumption to simulate a range of
+// possible option outcomes at expiration, then reads TP/SL suggestions off the
+// resulting distribution. This is a probability model, not a direction forecast —
+// it assumes lognormal returns (standard GBM) and says nothing about news, earnings,
+// or gaps, which is why it's an input to your judgment, not a replacement for it.
+function randn(){
+  let u=0, v=0;
+  while(u===0) u = Math.random();
+  while(v===0) v = Math.random();
+  return Math.sqrt(-2*Math.log(u)) * Math.cos(2*Math.PI*v);
+}
+
+function percentile(sortedArr, p){
+  if(sortedArr.length === 0) return null;
+  const idx = (p/100) * (sortedArr.length - 1);
+  const lo = Math.floor(idx), hi = Math.ceil(idx);
+  if(lo === hi) return sortedArr[lo];
+  return sortedArr[lo] + (sortedArr[hi]-sortedArr[lo]) * (idx-lo);
+}
+
+function runMonteCarlo(S0, strike, side, dteDays, sigma, r, nPaths){
+  const T = dteDays/365;
+  const nSteps = Math.max(1, Math.min(dteDays, 60));
+  const dt = T/nSteps;
+  const payoffs = new Array(nPaths);
+  const samplePaths = [];
+  const sampleCount = Math.min(25, nPaths);
+  for(let p=0; p<nPaths; p++){
+    let S = S0;
+    const storeThis = p < sampleCount;
+    const path = storeThis ? [S] : null;
+    for(let s=0; s<nSteps; s++){
+      const Z = randn();
+      S = S * Math.exp((r - 0.5*sigma*sigma)*dt + sigma*Math.sqrt(dt)*Z);
+      if(storeThis) path.push(S);
+    }
+    if(storeThis) samplePaths.push(path);
+    payoffs[p] = side === 'Call' ? Math.max(S - strike, 0) : Math.max(strike - S, 0);
+  }
+  return {payoffs, samplePaths, nSteps};
+}
+
+function computePredictiveTargets(pos, entry, confidenceBand, rfRatePct, nPaths, sigmaPctOverride){
+  const sigmaPct = sigmaPctOverride != null ? sigmaPctOverride : entry.iv;
+  if(entry.stockPrice == null || sigmaPct == null) return {error:'missing-inputs'};
+  const dte = daysBetween(entry.date, pos.expiration);
+  if(dte <= 0) return {error:'expired'};
+
+  const sigma = sigmaPct/100;
+  const r = rfRatePct/100;
+  const {payoffs, samplePaths} = runMonteCarlo(entry.stockPrice, pos.strike, pos.side, dte, sigma, r, nPaths);
+  const pctPayoffs = payoffs
+    .map(v => ((v - pos.entryPremium)/pos.entryPremium)*100)
+    .sort((a,b)=>a-b);
+
+  const lowP = (100-confidenceBand)/2;
+  const highP = 100 - lowP;
+  const slRaw = percentile(pctPayoffs, lowP);
+  const tp = percentile(pctPayoffs, highP);
+  const sl = Math.max(slRaw, -100); // can't lose more than the premium paid
+  const median = percentile(pctPayoffs, 50);
+  const mean = pctPayoffs.reduce((a,b)=>a+b,0)/pctPayoffs.length;
+  const probProfit = (pctPayoffs.filter(v=>v>0).length/pctPayoffs.length)*100;
+
+  return {tp, sl, median, mean, probProfit, dte, sigmaPct: sigma*100, pctPayoffs, samplePaths, S0: entry.stockPrice};
+}
+
+let simCache = {}; // posId -> last computed sim result, transient (not persisted)
+
+async function runSimulation(posId){
+  const pos = state.positions[posId];
+  const entries = sortEntries(state.entries[posId] || []);
+  const latest = entries[entries.length-1];
+  if(!latest){ return; }
+  const band = parseInt(document.getElementById('sim-band').value);
+  const rf = parseFloat(document.getElementById('sim-rf').value);
+  const volSource = document.getElementById('sim-vol-source').value;
+
+  const hv = computeHistoricalVol(state.historical[posId] || []);
+  let sigmaPct = null;
+  if(volSource === 'iv'){
+    sigmaPct = latest.iv;
+  } else if(volSource === 'hv'){
+    if(!hv){ simCache[posId] = {error:'no-historical'}; render(); return; }
+    sigmaPct = hv.annualizedPct;
+  } else if(volSource === 'blend'){
+    if(latest.iv == null && !hv){ simCache[posId] = {error:'missing-inputs'}; render(); return; }
+    if(latest.iv != null && hv) sigmaPct = (latest.iv + hv.annualizedPct)/2;
+    else sigmaPct = latest.iv != null ? latest.iv : hv.annualizedPct;
+  }
+
+  const result = computePredictiveTargets(pos, latest, band, isNaN(rf)?4.5:rf, 3000, sigmaPct);
+  simCache[posId] = result;
+  render();
+}
+
+async function applySuggestedTargets(posId){
+  const result = simCache[posId];
+  if(!result || result.error) return;
+  state.positions[posId].tpPct = Math.round(result.tp);
+  state.positions[posId].slPct = Math.round(result.sl);
+  await savePositions();
+  simCache[posId] = null;
+  render();
+}
+// --- end Monte Carlo section ---
+
+
+
+function newPosition(){
+  const app = document.getElementById('app');
+  app.insertAdjacentHTML('beforeend', '');
+  state._editing = null;
+  const wrap = document.getElementById('app');
+  wrap.querySelector('.positions-row').insertAdjacentHTML('afterend', renderSetupForm(null));
+}
+
+function editPosition(id){
+  const wrap = document.getElementById('app');
+  const existingCard = document.querySelectorAll('.card')[0];
+  existingCard.insertAdjacentHTML('afterend', renderSetupForm(state.positions[id]));
+}
+
+function cancelEdit(){ render(); }
+
+async function savePosition(existingId){
+  const ticker = document.getElementById('s-ticker').value.trim().toUpperCase();
+  const side = document.getElementById('s-side').value;
+  const strike = parseFloat(document.getElementById('s-strike').value);
+  const expiration = document.getElementById('s-exp').value;
+  const entryDate = document.getElementById('s-entrydate').value;
+  const contracts = parseInt(document.getElementById('s-contracts').value) || 1;
+  const entryPremium = parseFloat(document.getElementById('s-premium').value);
+  const tpPct = parseFloat(document.getElementById('s-tp').value);
+  const slPct = parseFloat(document.getElementById('s-sl').value);
+
+  if(!ticker || !expiration || !entryDate || isNaN(entryPremium)){
+    alert('Please fill in at least ticker, expiration, entry date, and entry premium.');
+    return;
+  }
+
+  const id = existingId || uid();
+  state.positions[id] = {
+    id, ticker, side, strike, expiration, entryDate, contracts,
+    entryPremium, tpPct, slPct,
+    status: (state.positions[id] && state.positions[id].status) || 'open'
+  };
+  if(!state.entries[id]) state.entries[id] = [];
+  if(!state.historical[id]) state.historical[id] = [];
+  state.activeId = id;
+  await savePositions();
+  await saveActiveId();
+  render();
+}
+
+async function deletePosition(id){
+  if(!confirm('Delete this position and all its logged entries? This cannot be undone.')) return;
+  delete state.positions[id];
+  delete state.entries[id];
+  delete state.historical[id];
+  try{ await S.delete('entries:' + id, false); }catch(e){}
+  try{ await S.delete('historical:' + id, false); }catch(e){}
+  const ids = Object.keys(state.positions);
+  state.activeId = ids[0] || null;
+  await savePositions();
+  await saveActiveId();
+  render();
+}
+
+async function closePosition(id){
+  state.positions[id].status = 'closed';
+  await savePositions();
+  render();
+}
+async function reopenPosition(id){
+  state.positions[id].status = 'open';
+  await savePositions();
+  render();
+}
+
+async function addEntry(){
+  const pos = state.positions[state.activeId];
+  const date = document.getElementById('in-date').value || todayStr();
+  const time = document.getElementById('in-time').value || TIME_SLOTS[0];
+  const stockPrice = parseFloat(document.getElementById('in-stock').value);
+  const bid = parseFloat(document.getElementById('in-bid').value);
+  const ask = parseFloat(document.getElementById('in-ask').value);
+  const iv = parseFloat(document.getElementById('in-iv').value);
+  const delta = parseFloat(document.getElementById('in-delta').value);
+  const notes = document.getElementById('in-notes').value.trim();
+
+  if(isNaN(bid) && isNaN(ask)){
+    alert('Enter at least a bid or an ask for the option.');
+    return;
+  }
+
+  const entry = {
+    date,
+    time,
+    stockPrice: isNaN(stockPrice) ? null : stockPrice,
+    bid: isNaN(bid) ? null : bid,
+    ask: isNaN(ask) ? null : ask,
+    iv: isNaN(iv) ? null : iv,
+    delta: isNaN(delta) ? null : delta,
+    notes: notes || null
+  };
+
+  if(!state.entries[pos.id]) state.entries[pos.id] = [];
+  const existingIdx = state.entries[pos.id].findIndex(e => e.date === date && e.time === time);
+  if(existingIdx >= 0) state.entries[pos.id][existingIdx] = entry;
+  else state.entries[pos.id].push(entry);
+
+  simCache[pos.id] = null; // new data logged — old simulation is stale
+  await saveEntries(pos.id);
+  render();
+}
+
+async function deleteEntry(posId, idx){
+  const entries = sortEntries(state.entries[posId]||[]);
+  const target = entries[idx];
+  state.entries[posId] = state.entries[posId].filter(e => !(e.date === target.date && e.time === target.time));
+  await saveEntries(posId);
+  render();
+}
+
+function renderPredictiveCard(pos, entries){
+  const latest = entries[entries.length-1];
+  const result = simCache[pos.id];
+  const hist = state.historical[pos.id] || [];
+  const hv = computeHistoricalVol(hist);
+
+  let body = '';
+  if(!latest || latest.stockPrice == null){
+    body = `<div class="empty">Log at least one entry with a stock price to enable this.</div>`;
+  } else if(latest.iv == null && !hv){
+    body = `<div class="empty">Log an implied vol value on today's entry, or paste historical closes below, to enable this.</div>`;
+  } else {
+    const ivOpt = latest.iv != null;
+    const hvOpt = !!hv;
+    body += `<div class="row3">
+      <div class="field"><label>Confidence band</label>
+        <select id="sim-band">
+          <option value="90">90%</option>
+          <option value="80" selected>80%</option>
+          <option value="70">70%</option>
+          <option value="60">60%</option>
+        </select>
+      </div>
+      <div class="field"><label>Volatility source</label>
+        <select id="sim-vol-source">
+          <option value="iv" ${!ivOpt?'disabled':''}>Implied vol (logged)${ivOpt?': '+fmt(latest.iv,1)+'%':''}</option>
+          <option value="hv" ${!hvOpt?'disabled':''} ${!ivOpt&&hvOpt?'selected':''}>Historical vol (computed)${hvOpt?': '+fmt(hv.annualizedPct,1)+'%':''}</option>
+          <option value="blend" ${!ivOpt||!hvOpt?'disabled':''}>Blend of both</option>
+        </select>
+      </div>
+      <div class="field"><label>Risk-free rate %</label><input type="number" step="0.1" id="sim-rf" value="4.5"></div>
+    </div>
+    <button class="primary" onclick="runSimulation('${pos.id}')">Run simulation</button>`;
+
+    if(result && result.error === 'missing-inputs'){
+      body += `<div class="empty" style="margin-top:10px;">Missing stock price or a volatility input.</div>`;
+    } else if(result && result.error === 'no-historical'){
+      body += `<div class="empty" style="margin-top:10px;">No historical closes saved yet — paste some below, or pick a different volatility source.</div>`;
+    } else if(result && result.error === 'expired'){
+      body += `<div class="empty" style="margin-top:10px;">This contract's expiration date has passed.</div>`;
+    } else if(result){
+      const tpPrice = priceFromPct(pos.entryPremium, result.tp);
+      const slPrice = priceFromPct(pos.entryPremium, result.sl);
+      body += `
+        <div class="row3" style="margin-top:14px;">
+          <div><label>Move TP to</label><div class="pnl-pos" style="font-size:18px;font-weight:600;padding:4px 0;">$${fmt(tpPrice)}</div>
+            <div style="color:var(--muted);font-size:12px;">${result.tp>=0?'+':''}${fmt(result.tp,1)}% from entry</div></div>
+          <div><label>Move SL to</label><div class="pnl-neg" style="font-size:18px;font-weight:600;padding:4px 0;">$${fmt(slPrice)}</div>
+            <div style="color:var(--muted);font-size:12px;">${fmt(result.sl,1)}% from entry</div></div>
+          <div><label>Odds of any profit at expiration</label><div style="font-size:18px;font-weight:600;padding:4px 0;">${fmt(result.probProfit,0)}%</div></div>
+        </div>
+        <div class="row3">
+          <div><label>Median outcome price</label><div style="padding:4px 0;color:var(--muted);">$${fmt(priceFromPct(pos.entryPremium, result.median))}</div></div>
+          <div><label>Days to expiration used</label><div style="padding:4px 0;color:var(--muted);">${result.dte}</div></div>
+          <div><label>Volatility used</label><div style="padding:4px 0;color:var(--muted);">${fmt(result.sigmaPct,1)}%</div></div>
+        </div>
+        <canvas id="sim-hist" style="margin-top:8px;"></canvas>
+        <button class="ghost" style="margin-top:8px;" onclick="applySuggestedTargets('${pos.id}')">Apply — move TP to $${fmt(tpPrice)}, SL to $${fmt(slPrice)}</button>
+        <div class="adj-text" style="margin-top:10px;">
+          Based on ${3000} simulated price paths assuming lognormal (Brownian motion) returns at ${fmt(result.sigmaPct,1)}% volatility —
+          the same assumption behind Black-Scholes. It doesn't account for earnings surprises, news, or gaps.
+          Treat it as a probability-informed range, not a forecast.
+        </div>`;
+    }
+  }
+
+  body += `<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+    <label>Historical closes for the underlying (optional — improves the volatility estimate)</label>
+    <textarea id="hist-input" rows="4" style="width:100%;background:var(--card-2);border:1px solid var(--border);
+      color:var(--text);border-radius:7px;padding:8px 10px;font-size:12.5px;font-family:monospace;resize:vertical;"
+      placeholder="One per line: date,close&#10;2026-08-01,3.42&#10;2026-08-04,3.58&#10;...">${hist.map(r=>r.date?`${r.date},${r.close}`:r.close).join('\n')}</textarea>
+    <div class="foot-actions">
+      <button class="ghost" onclick="saveHistoricalInput('${pos.id}')">Save closes</button>
+      ${hist.length ? `<button class="ghost danger" onclick="clearHistoricalInput('${pos.id}')">Clear</button>` : ''}
+    </div>
+    <div class="adj-text" style="margin-top:6px;">
+      ${hv ? `Computed from ${hv.sampleSize} closes: ${fmt(hv.annualizedPct,1)}% annualized historical volatility.`
+           : hist.length ? `Need at least 6 valid closes to compute a volatility estimate (currently have ${hist.length}).`
+           : `Paste daily closes as "date,close" per line (or just closes, one per line) — 20–90 trading days is a reasonable range.`}
+    </div>
+  </div>`;
+
+  return `<div class="card">
+    <h2>Predictive targets (Monte Carlo)</h2>
+    ${body}
+  </div>`;
+}
+
+function drawHistogram(pos, result){
+  const canvas = document.getElementById('sim-hist');
+  if(!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = 130;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+
+  const data = result.pctPayoffs;
+  const min = Math.max(data[0], -100);
+  const max = data[data.length-1];
+  const range = (max-min) || 1;
+  const nBins = 40;
+  const bins = new Array(nBins).fill(0);
+  data.forEach(v=>{
+    const clamped = Math.max(min, Math.min(max, v));
+    let idx = Math.floor(((clamped-min)/range)*nBins);
+    if(idx>=nBins) idx = nBins-1;
+    if(idx<0) idx = 0;
+    bins[idx]++;
+  });
+  const maxBin = Math.max(...bins);
+  const pad = 10, plotW = w - pad*2, plotH = h - pad*2;
+  const barW = plotW/nBins;
+
+  ctx.fillStyle = '#2c3a52';
+  bins.forEach((count,i)=>{
+    const bh = (count/maxBin)*plotH;
+    ctx.fillRect(pad + i*barW, pad + (plotH-bh), Math.max(barW-1,1), bh);
+  });
+
+  function xAt(v){ return pad + ((Math.max(min,Math.min(max,v))-min)/range)*plotW; }
+
+  ctx.strokeStyle = '#8b91a1';
+  ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(xAt(0), pad); ctx.lineTo(xAt(0), pad+plotH); ctx.stroke();
+
+  ctx.strokeStyle = '#3ddc97';
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(xAt(result.tp), pad); ctx.lineTo(xAt(result.tp), pad+plotH); ctx.stroke();
+
+  ctx.strokeStyle = '#ff6b6b';
+  ctx.beginPath(); ctx.moveTo(xAt(result.sl), pad); ctx.lineTo(xAt(result.sl), pad+plotH); ctx.stroke();
+}
+
+function drawChart(pos, entries){
+  const canvas = document.getElementById('chart');
+  if(!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = 140;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+
+  const marks = entries.map(e => computeMark(e.bid, e.ask)).filter(v => v!=null);
+  if(marks.length < 1) return;
+  const allVals = marks.concat([pos.entryPremium]);
+  const min = Math.min(...allVals), max = Math.max(...allVals);
+  const pad = 16, plotW = w - pad*2, plotH = h - pad*2;
+  const range = (max - min) || 1;
+
+  function xAt(i){ return pad + (entries.length<=1 ? 0 : (i/(entries.length-1))*plotW); }
+  function yAt(v){ return pad + plotH - ((v-min)/range)*plotH; }
+
+  // entry premium reference line
+  ctx.strokeStyle = '#3a4050';
+  ctx.setLineDash([4,4]);
+  ctx.beginPath();
+  ctx.moveTo(pad, yAt(pos.entryPremium));
+  ctx.lineTo(w-pad, yAt(pos.entryPremium));
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // TP / SL lines
+  const tpVal = pos.entryPremium * (1 + pos.tpPct/100);
+  const slVal = pos.entryPremium * (1 + pos.slPct/100);
+  ctx.strokeStyle = 'rgba(61,220,151,0.4)';
+  ctx.beginPath(); ctx.moveTo(pad, yAt(tpVal)); ctx.lineTo(w-pad, yAt(tpVal)); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,107,107,0.4)';
+  ctx.beginPath(); ctx.moveTo(pad, yAt(slVal)); ctx.lineTo(w-pad, yAt(slVal)); ctx.stroke();
+
+  // premium line
+  ctx.strokeStyle = '#5b8def';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  entries.forEach((e,i)=>{
+    const m = computeMark(e.bid, e.ask);
+    if(m==null) return;
+    const x = xAt(i), y = yAt(m);
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+
+  entries.forEach((e,i)=>{
+    const m = computeMark(e.bid, e.ask);
+    if(m==null) return;
+    ctx.fillStyle = '#5b8def';
+    ctx.beginPath();
+    ctx.arc(xAt(i), yAt(m), 3, 0, Math.PI*2);
+    ctx.fill();
+  });
+}
+
+loadState();
+</script>
+</body>
+</html>
