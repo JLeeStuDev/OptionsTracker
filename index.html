@@ -483,26 +483,45 @@ function renderSetupForm(existing){
 }
 
 // --- Historical volatility (optional cross-check against logged IV) ---
-// Expects pasted lines of "date,close" (or just closes, one per line, oldest first
-// or newest first — order is auto-detected by date). Computes annualized volatility
-// from the standard deviation of daily log returns.
+// Accepts either a simple "date,close" per line paste, or a typical exported CSV
+// with a header row and multiple columns (Date, Open, High, Low, Close, Adj Close,
+// Volume — the usual Yahoo Finance / broker export shape). Header detection picks
+// the Date column and prefers Adj Close over Close over the second column.
+// Computes annualized volatility from the standard deviation of daily log returns.
 function parseHistoricalCSV(text){
-  const rows = [];
   const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l.length);
-  for(const line of lines){
-    const parts = line.split(',').map(s=>s.trim());
-    let date, close;
-    if(parts.length >= 2){
-      date = parts[0].replace(/"/g,'');
-      close = parseFloat(parts[1].replace(/[^0-9.\-]/g,''));
-    } else {
-      close = parseFloat(parts[0].replace(/[^0-9.\-]/g,''));
-      date = null;
+  if(!lines.length) return [];
+
+  const splitLine = l => l.split(',').map(s=>s.trim().replace(/^"|"$/g,''));
+  const firstCols = splitLine(lines[0]);
+  const looksLikeHeader = firstCols.some(c => /date|close|open|high|low|volume|adj/i.test(c));
+
+  let dateIdx = 0, closeIdx = 1, dataLines = lines;
+  if(looksLikeHeader){
+    dataLines = lines.slice(1);
+    const lower = firstCols.map(c=>c.toLowerCase());
+    const dIdx = lower.findIndex(c => c.includes('date'));
+    const adjIdx = lower.findIndex(c => c.includes('adj close') || c.includes('adj. close') || c==='adjclose');
+    const cIdx = lower.findIndex(c => c==='close' || (c.includes('close') && !c.includes('adj')));
+    dateIdx = dIdx >= 0 ? dIdx : 0;
+    closeIdx = adjIdx >= 0 ? adjIdx : (cIdx >= 0 ? cIdx : 1);
+  }
+
+  const rows = [];
+  for(const line of dataLines){
+    const parts = splitLine(line);
+    if(parts.length < 2){
+      const close = parseFloat(parts[0].replace(/[^0-9.\-]/g,''));
+      if(!isNaN(close)) rows.push({date:null, close});
+      continue;
     }
+    const rawDate = parts[dateIdx];
+    const date = rawDate && !isNaN(Date.parse(rawDate)) ? rawDate : null;
+    const close = parseFloat((parts[closeIdx]||'').replace(/[^0-9.\-]/g,''));
     if(!isNaN(close)) rows.push({date, close});
   }
   // if dates are present and parseable, sort ascending by date; otherwise keep input order
-  const allDated = rows.every(r => r.date && !isNaN(new Date(r.date)));
+  const allDated = rows.length>0 && rows.every(r => r.date);
   if(allDated) rows.sort((a,b)=> new Date(a.date) - new Date(b.date));
   return rows;
 }
@@ -519,6 +538,19 @@ function computeHistoricalVol(closes){
   const dailyStdev = Math.sqrt(variance);
   const annualizedPct = dailyStdev * Math.sqrt(252) * 100;
   return {annualizedPct, sampleSize: prices.length};
+}
+
+function handleHistFileUpload(posId){
+  const input = document.getElementById('hist-file');
+  const file = input.files && input.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    document.getElementById('hist-input').value = e.target.result;
+    input.value = ''; // reset so picking the same file again still fires change
+  };
+  reader.onerror = () => alert('Could not read that file — try re-exporting it as a plain CSV.');
+  reader.readAsText(file);
 }
 
 async function saveHistoricalInput(posId){
@@ -832,9 +864,12 @@ function renderPredictiveCard(pos, entries){
 
   body += `<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
     <label>Historical closes for the underlying (optional — improves the volatility estimate)</label>
+    <div class="field" style="margin-bottom:8px;">
+      <input type="file" id="hist-file" accept=".csv,text/csv" onchange="handleHistFileUpload('${pos.id}')">
+    </div>
     <textarea id="hist-input" rows="4" style="width:100%;background:var(--card-2);border:1px solid var(--border);
       color:var(--text);border-radius:7px;padding:8px 10px;font-size:12.5px;font-family:monospace;resize:vertical;"
-      placeholder="One per line: date,close&#10;2026-08-01,3.42&#10;2026-08-04,3.58&#10;...">${hist.map(r=>r.date?`${r.date},${r.close}`:r.close).join('\n')}</textarea>
+      placeholder="Upload a CSV above, or paste rows here: date,close&#10;2026-08-01,3.42&#10;2026-08-04,3.58&#10;...">${hist.map(r=>r.date?`${r.date},${r.close}`:r.close).join('\n')}</textarea>
     <div class="foot-actions">
       <button class="ghost" onclick="saveHistoricalInput('${pos.id}')">Save closes</button>
       ${hist.length ? `<button class="ghost danger" onclick="clearHistoricalInput('${pos.id}')">Clear</button>` : ''}
@@ -842,7 +877,7 @@ function renderPredictiveCard(pos, entries){
     <div class="adj-text" style="margin-top:6px;">
       ${hv ? `Computed from ${hv.sampleSize} closes: ${fmt(hv.annualizedPct,1)}% annualized historical volatility.`
            : hist.length ? `Need at least 6 valid closes to compute a volatility estimate (currently have ${hist.length}).`
-           : `Paste daily closes as "date,close" per line (or just closes, one per line) — 20–90 trading days is a reasonable range.`}
+           : `Upload a CSV (handles typical exports with a Date and Close/Adj Close column), or paste "date,close" rows manually — 20–90 trading days is a reasonable range. Review what lands in the box, then hit Save.`}
     </div>
   </div>`;
 
