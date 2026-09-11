@@ -136,7 +136,30 @@
 </div>
 
 <script>
-const S = window.storage;
+// Real browser localStorage — works when this file is hosted anywhere (e.g. GitHub Pages),
+// unlike window.storage which only exists inside Claude.ai's in-chat artifact preview.
+// Wrapped with the same get/set/delete(key, shared) shape so the rest of the app is unchanged.
+const LS_PREFIX = 'options-tracker:';
+const S = {
+  get(key){
+    try{
+      const v = localStorage.getItem(LS_PREFIX + key);
+      return Promise.resolve(v === null ? null : {key, value: v});
+    }catch(e){ return Promise.reject(e); }
+  },
+  set(key, value){
+    try{
+      localStorage.setItem(LS_PREFIX + key, value);
+      return Promise.resolve({key, value});
+    }catch(e){ return Promise.reject(e); }
+  },
+  delete(key){
+    try{
+      localStorage.removeItem(LS_PREFIX + key);
+      return Promise.resolve({key, deleted:true});
+    }catch(e){ return Promise.reject(e); }
+  }
+};
 const TIME_SLOTS = ['10:30 AM', '12:00 PM', '3:30 PM'];
 function timeOrder(t){ const i = TIME_SLOTS.indexOf(t); return i===-1 ? 99 : i; }
 function sortEntries(list){
