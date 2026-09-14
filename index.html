@@ -183,6 +183,8 @@ let state = {
   view: 'positions',    // 'positions' | 'account'
   accountLog: [],        // [ {date, value, notes} ] — total account size over time
   tradeHistory: [],       // [ {positionId, ticker, entryDate, exitDate, entryPremium, exitPremium, contracts, realizedPL, realizedPct} ]
+  accountGoals: [],        // custom milestone amounts, e.g. [500, 1000, 2500] — only used once goalsCustomized is true
+  goalsCustomized: false,   // whether the user has ever added/removed a milestone (else DEFAULT_ACCOUNT_GOALS is shown)
   _closingId: null        // transient — position currently showing the close form
 };
 
@@ -216,6 +218,13 @@ async function loadState(){
     const thRes = await S.get('tradeHistory', false);
     state.tradeHistory = thRes && thRes.value ? JSON.parse(thRes.value) : [];
   }catch(e){ state.tradeHistory = []; }
+  try{
+    const goalsRes = await S.get('accountGoals', false);
+    if(goalsRes && goalsRes.value){
+      state.accountGoals = JSON.parse(goalsRes.value);
+      state.goalsCustomized = true;
+    }
+  }catch(e){}
   const ids = Object.keys(state.positions);
   if(!state.activeId || !state.positions[state.activeId]) state.activeId = ids[0] || null;
   for(const id of ids){
@@ -242,6 +251,10 @@ async function saveAccountLog(){
 async function saveTradeHistory(){
   try{ await S.set('tradeHistory', JSON.stringify(state.tradeHistory), false); }
   catch(e){ console.error('save trade history failed', e); }
+}
+async function saveAccountGoals(){
+  try{ await S.set('accountGoals', JSON.stringify(state.accountGoals), false); }
+  catch(e){ console.error('save account goals failed', e); }
 }
 function setView(v){ state.view = v; state._closingId = null; saveView(); render(); }
 
@@ -1296,6 +1309,12 @@ function renderAccountView(){
     const changeVal = first ? latest.value - first.value : null;
     const changePct = first && first.value ? (changeVal/first.value)*100 : null;
     const changeClass = changeVal==null ? '' : (changeVal>=0 ? 'pnl-pos':'pnl-neg');
+    const breakdown = (latest.components && latest.components.length) ? `
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08);">
+        ${latest.components.map(c => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--muted);">
+          <span>${c.label}</span><span>$${fmt(c.value)} (${latest.value ? fmt((c.value/latest.value)*100,1) : '0.0'}%)</span>
+        </div>`).join('')}
+      </div>` : '';
     summary = `<div class="card">
       <h2>Overview</h2>
       <div class="row3">
@@ -1309,18 +1328,34 @@ function renderAccountView(){
         That last figure is a quick reference for your year-end contribution-increase rule — next year's weekly VOO
         contribution is meant to go up by 1% of whatever the account is worth at that year's close, not today's value.
       </div>
+      ${breakdown}
     </div>`;
   }
 
   const calcCard = renderPositionSizeCalc(latest);
+  const goalsCard = renderGoalsCard(latest);
+
+  // Seed today's form with yesterday's component labels (blank values) for convenience,
+  // or two blank rows if nothing's been logged with a breakdown yet.
+  const seedComponents = (latest && latest.components && latest.components.length)
+    ? latest.components.map(c => ({label:c.label, value:''}))
+    : [{label:'',value:''},{label:'',value:''}];
+  acctRowCount = seedComponents.length - 1;
 
   const form = `<div class="card">
     <h2>Log account size</h2>
-    <div class="row3">
+    <div class="row2" style="margin-bottom:10px;">
       <div class="field"><label>Date</label><input type="date" id="acct-date" value="${todayStr()}"></div>
-      <div class="field"><label>Total account value ($)</label><input type="number" step="0.01" id="acct-value" placeholder="e.g. 372.87"></div>
       <div class="field"><label>Notes (optional)</label><input type="text" id="acct-notes" placeholder="e.g. after this week's VOO buy"></div>
     </div>
+    <label>Breakdown — what's contributing to the total</label>
+    <div id="acct-components-container">
+      ${seedComponents.map((c,i)=>acctComponentRowHTML(i, c.label, c.value)).join('')}
+    </div>
+    <div class="foot-actions" style="margin-bottom:8px;">
+      <button class="ghost" onclick="addAcctComponentRow()">+ Add component</button>
+    </div>
+    <div style="font-size:14px;font-weight:600;margin-bottom:10px;">Total: $<span id="acct-total-preview">0.00</span></div>
     <button class="primary" onclick="addAccountEntry()">Add entry</button>
   </div>`;
 
@@ -1333,7 +1368,7 @@ function renderAccountView(){
     historyCard += `<div class="empty">Nothing logged yet — add your first entry above.</div>`;
   } else {
     historyCard += `<div class="tbl-wrap"><table><thead><tr>
-      <th>Date</th><th>Value</th><th>Change</th><th>Notes</th><th></th>
+      <th>Date</th><th>Value</th><th>Change</th><th>Breakdown</th><th>Notes</th><th></th>
     </tr></thead><tbody>`;
     for(let i=log.length-1;i>=0;i--){
       const e = log[i];
@@ -1341,10 +1376,14 @@ function renderAccountView(){
       const change = prev ? e.value - prev.value : null;
       const changePct = prev && prev.value ? (change/prev.value)*100 : null;
       const changeClass = change==null ? '' : (change>=0?'pnl-pos':'pnl-neg');
+      const breakdownText = (e.components && e.components.length)
+        ? e.components.map(c=>`${c.label}: $${fmt(c.value)}`).join(', ')
+        : '—';
       historyCard += `<tr>
         <td>${e.date}</td>
         <td>$${fmt(e.value)}</td>
         <td class="${changeClass}">${change!=null ? (change>=0?'+':'')+'$'+fmt(Math.abs(change))+' ('+(changePct>=0?'+':'')+fmt(changePct,1)+'%)' : '—'}</td>
+        <td style="color:var(--muted);">${breakdownText}</td>
         <td style="color:var(--muted);">${e.notes||'—'}</td>
         <td><span class="del-x" onclick="deleteAccountEntry('${e.date}')" title="Delete entry">✕</span></td>
       </tr>`;
@@ -1353,17 +1392,129 @@ function renderAccountView(){
   }
   historyCard += `</div>`;
 
-  return summary + renderMonthlyGoalCard() + calcCard + form + chartCard + historyCard + renderTradeHistoryCard();
+  return summary + goalsCard + renderMonthlyGoalCard() + calcCard + form + chartCard + historyCard + renderTradeHistoryCard();
+}
+
+let acctRowCount = 0;
+
+function acctComponentRowHTML(idx, label='', value=''){
+  return `<div class="row2" id="acct-comp-row-${idx}" style="margin-bottom:6px;">
+    <div class="field"><input type="text" class="acct-comp-label" placeholder="e.g. VOO" value="${label}"></div>
+    <div class="field" style="display:flex;gap:6px;">
+      <input type="number" step="0.01" class="acct-comp-value" placeholder="e.g. 250.00" value="${value}" oninput="updateAcctTotalPreview()" style="flex:1;">
+      <button class="ghost danger" style="padding:8px 10px;" onclick="removeAcctComponentRow(${idx})">✕</button>
+    </div>
+  </div>`;
+}
+
+function addAcctComponentRow(){
+  acctRowCount++;
+  document.getElementById('acct-components-container').insertAdjacentHTML('beforeend', acctComponentRowHTML(acctRowCount));
+  updateAcctTotalPreview();
+}
+
+function removeAcctComponentRow(idx){
+  const el = document.getElementById('acct-comp-row-'+idx);
+  if(el) el.remove();
+  updateAcctTotalPreview();
+}
+
+function updateAcctTotalPreview(){
+  const values = document.querySelectorAll('#acct-components-container .acct-comp-value');
+  let total = 0;
+  values.forEach(v => { const n = parseFloat(v.value); if(!isNaN(n)) total += n; });
+  const el = document.getElementById('acct-total-preview');
+  if(el) el.textContent = fmt(total);
+}
+
+function collectAcctComponents(){
+  const labels = document.querySelectorAll('#acct-components-container .acct-comp-label');
+  const values = document.querySelectorAll('#acct-components-container .acct-comp-value');
+  const components = [];
+  for(let i=0;i<labels.length;i++){
+    const label = labels[i].value.trim();
+    const val = parseFloat(values[i].value);
+    if(label && !isNaN(val)) components.push({label, value: val});
+  }
+  return components;
+}
+
+const DEFAULT_ACCOUNT_GOALS = [500, 1000, 2500, 5000, 10000, 25000, 50000];
+
+function findGoalAchievedDate(goal, log){
+  const hit = log.find(e => e.value >= goal);
+  return hit ? hit.date : null;
+}
+
+function renderGoalsCard(latest){
+  const log = sortAccountLog();
+  const currentValue = latest ? latest.value : 0;
+  const goals = (state.goalsCustomized ? state.accountGoals : DEFAULT_ACCOUNT_GOALS).slice().sort((a,b)=>a-b);
+
+  let rows = '';
+  if(!log.length){
+    rows = `<div class="empty">Log at least one account value to track progress toward these.</div>`;
+  } else {
+    goals.forEach(g=>{
+      const achievedDate = findGoalAchievedDate(g, log);
+      const pct = Math.min(100, Math.max(0,(currentValue/g)*100));
+      rows += `<div style="margin-bottom:12px;">
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;">
+          <span>$${fmt(g,0)}</span>
+          <span style="color:${achievedDate?'var(--green)':'var(--muted)'};">
+            ${achievedDate ? 'Reached ' + achievedDate : '$' + fmt(Math.max(g-currentValue,0),0) + ' to go'}
+          </span>
+          <span class="del-x" onclick="removeAcctGoal(${g})" title="Remove milestone">✕</span>
+        </div>
+        <div style="background:var(--card-2);border-radius:6px;height:8px;overflow:hidden;">
+          <div style="width:${pct}%;height:100%;background:${achievedDate?'var(--green)':'var(--accent)'};"></div>
+        </div>
+      </div>`;
+    });
+  }
+
+  return `<div class="card">
+    <h2>Milestones</h2>
+    ${rows}
+    <div class="row2" style="margin-top:6px;">
+      <div class="field"><input type="number" step="1" id="new-goal-amount" placeholder="e.g. 750"></div>
+      <div class="field"><button class="ghost" style="width:100%;" onclick="addAcctGoal()">Add milestone</button></div>
+    </div>
+  </div>`;
+}
+
+async function ensureGoalsCustomized(){
+  if(!state.goalsCustomized){
+    state.accountGoals = [...DEFAULT_ACCOUNT_GOALS];
+    state.goalsCustomized = true;
+  }
+}
+
+async function addAcctGoal(){
+  const val = parseFloat(document.getElementById('new-goal-amount').value);
+  if(isNaN(val) || val <= 0){ alert('Enter a valid milestone amount.'); return; }
+  await ensureGoalsCustomized();
+  if(!state.accountGoals.includes(val)) state.accountGoals.push(val);
+  await saveAccountGoals();
+  render();
+}
+
+async function removeAcctGoal(val){
+  await ensureGoalsCustomized();
+  state.accountGoals = state.accountGoals.filter(g => g !== val);
+  await saveAccountGoals();
+  render();
 }
 
 async function addAccountEntry(){
   const date = document.getElementById('acct-date').value || todayStr();
-  const value = parseFloat(document.getElementById('acct-value').value);
   const notes = document.getElementById('acct-notes').value.trim();
-  if(isNaN(value)){ alert('Enter a total account value.'); return; }
+  const components = collectAcctComponents();
+  if(!components.length){ alert('Enter at least one component with a label and a value.'); return; }
+  const value = components.reduce((a,c)=>a+c.value,0);
 
   const existingIdx = state.accountLog.findIndex(e => e.date === date);
-  const entry = {date, value, notes: notes || null};
+  const entry = {date, value, components, notes: notes || null};
   if(existingIdx >= 0) state.accountLog[existingIdx] = entry;
   else state.accountLog.push(entry);
 
