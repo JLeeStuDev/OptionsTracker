@@ -31,12 +31,6 @@
   .sub{color:var(--muted);font-size:13px;margin:0 0 20px;}
 
   .positions-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;}
-  .top-tabs{display:flex;gap:6px;margin-bottom:18px;border-bottom:1px solid var(--border);}
-  .top-tab{
-    padding:8px 4px;margin-bottom:-1px;border:none;background:none;color:var(--muted);
-    font-size:14px;font-weight:600;cursor:pointer;border-bottom:2px solid transparent;
-  }
-  .top-tab.active{color:var(--text);border-bottom-color:var(--accent);}
   .pos-chip{
     padding:7px 12px;border-radius:8px;border:1px solid var(--border);
     background:var(--card);cursor:pointer;font-size:13px;color:var(--muted);
@@ -126,6 +120,10 @@
   .tag.win{background:#122a22;color:var(--green);}
   .tag.loss{background:#2a1414;color:var(--red);}
   .tag.caution{background:#2a2312;color:var(--amber);}
+  .tag.trail{background:#122a22;color:var(--green);}
+  .tag.itm{background:#122a22;color:var(--green);}
+  .tag.otm{background:#1c2028;color:var(--muted);}
+  .adj-tag.trail{background:#122a22;color:var(--green);}
   .empty{color:var(--muted);text-align:center;padding:24px 0;font-size:13px;}
 
   canvas{width:100%;height:140px;display:block;}
@@ -179,13 +177,7 @@ let state = {
   positions: {},      // id -> {ticker, side, strike, expiration, entryDate, entryPremium, contracts, tpPct, slPct, status, closedEntry}
   activeId: null,
   entries: {},         // positionId -> [ {date, stockPrice, bid, ask, iv, delta, notes} ]
-  historical: {},       // positionId -> [ {date, close} ]  (pasted-in daily closes for the underlying)
-  view: 'positions',    // 'positions' | 'account'
-  accountLog: [],        // [ {date, value, notes} ] — total account size over time
-  tradeHistory: [],       // [ {positionId, ticker, entryDate, exitDate, entryPremium, exitPremium, contracts, realizedPL, realizedPct} ]
-  accountGoals: [],        // custom milestone amounts, e.g. [500, 1000, 2500] — only used once goalsCustomized is true
-  goalsCustomized: false,   // whether the user has ever added/removed a milestone (else DEFAULT_ACCOUNT_GOALS is shown)
-  _closingId: null        // transient — position currently showing the close form
+  historical: {}        // positionId -> [ {date, close} ]  (pasted-in daily closes for the underlying)
 };
 
 function uid(){ return 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
@@ -206,25 +198,6 @@ async function loadState(){
     const activeRes = await S.get('activeId', false);
     if(activeRes && activeRes.value) state.activeId = activeRes.value;
   }catch(e){}
-  try{
-    const viewRes = await S.get('view', false);
-    if(viewRes && viewRes.value) state.view = viewRes.value;
-  }catch(e){}
-  try{
-    const acctRes = await S.get('accountLog', false);
-    state.accountLog = acctRes && acctRes.value ? JSON.parse(acctRes.value) : [];
-  }catch(e){ state.accountLog = []; }
-  try{
-    const thRes = await S.get('tradeHistory', false);
-    state.tradeHistory = thRes && thRes.value ? JSON.parse(thRes.value) : [];
-  }catch(e){ state.tradeHistory = []; }
-  try{
-    const goalsRes = await S.get('accountGoals', false);
-    if(goalsRes && goalsRes.value){
-      state.accountGoals = JSON.parse(goalsRes.value);
-      state.goalsCustomized = true;
-    }
-  }catch(e){}
   const ids = Object.keys(state.positions);
   if(!state.activeId || !state.positions[state.activeId]) state.activeId = ids[0] || null;
   for(const id of ids){
@@ -239,24 +212,6 @@ async function loadState(){
   }
   render();
 }
-
-async function saveView(){
-  try{ await S.set('view', state.view, false); }
-  catch(e){ console.error('save view failed', e); }
-}
-async function saveAccountLog(){
-  try{ await S.set('accountLog', JSON.stringify(state.accountLog), false); }
-  catch(e){ console.error('save account log failed', e); }
-}
-async function saveTradeHistory(){
-  try{ await S.set('tradeHistory', JSON.stringify(state.tradeHistory), false); }
-  catch(e){ console.error('save trade history failed', e); }
-}
-async function saveAccountGoals(){
-  try{ await S.set('accountGoals', JSON.stringify(state.accountGoals), false); }
-  catch(e){ console.error('save account goals failed', e); }
-}
-function setView(v){ state.view = v; state._closingId = null; saveView(); render(); }
 
 async function savePositions(){
   try{ await S.set('positions', JSON.stringify(state.positions), false); }
@@ -275,13 +230,6 @@ async function saveHistorical(id){
   catch(e){ console.error('save historical failed', e); }
 }
 
-function selectPosition(id){
-  state.activeId = id;
-  state._closingId = null; // don't carry a stale close-form to a different position
-  saveActiveId();
-  render();
-}
-
 function computeMark(bid, ask){
   if(bid==null && ask==null) return null;
   if(bid==null) return ask;
@@ -289,15 +237,54 @@ function computeMark(bid, ask){
   return (Number(bid) + Number(ask)) / 2;
 }
 
-function evaluate(pos, entry){
+// Pure P&L% calc, split out from evaluate() so peak-tracking and the closed-position
+// summary can compute it without pulling in verdict/trailing-stop logic.
+function computePnlPct(pos, entry){
   const mark = computeMark(entry.bid, entry.ask);
   const entryPrem = pos.entryPremium;
-  const pnlPct = (mark!=null && entryPrem) ? ((mark - entryPrem) / entryPrem) * 100 : null;
+  return (mark!=null && entryPrem) ? ((mark - entryPrem) / entryPrem) * 100 : null;
+}
+
+// ITM/OTM/ATM relative to the position's strike and side. Null if no stock price logged.
+function computeMoneyness(pos, entry){
+  if(entry.stockPrice == null || pos.strike == null) return null;
+  const diff = pos.side === 'Call' ? (entry.stockPrice - pos.strike) : (pos.strike - entry.stockPrice);
+  const state = diff > 0 ? 'ITM' : diff < 0 ? 'OTM' : 'ATM';
+  return {state, diff: Math.abs(diff)};
+}
+
+// Running high-water-mark of P&L% across a sorted entries array — index i holds the
+// best P&L% seen at any checkpoint from 0..i inclusive. Feeds the trailing-stop check
+// in evaluate() and the "armed / not armed" status line in the banner.
+function computePeakSeries(pos, sortedEntries){
+  let peak = null;
+  return sortedEntries.map(e=>{
+    const p = computePnlPct(pos, e);
+    if(p!=null && (peak==null || p>peak)) peak = p;
+    return peak;
+  });
+}
+
+function evaluate(pos, entry, peakPnlPct){
+  const mark = computeMark(entry.bid, entry.ask);
+  const entryPrem = pos.entryPremium;
+  const pnlPct = computePnlPct(pos, entry);
   const dte = daysBetween(entry.date, pos.expiration);
+  const moneyness = computeMoneyness(pos, entry);
   let verdict, cls, tagCls, detail;
 
   const tpPrice = priceFromPct(entryPrem, pos.tpPct);
   const slPrice = priceFromPct(entryPrem, pos.slPct);
+
+  // Trailing stop: once P&L% has peaked at or above trailArmPct, it "arms". From then on,
+  // giving back trailGivebackPct of that peak (as a fraction of the gain, not raw points)
+  // is treated as its own close trigger — independent of the original TP/SL — so a trade
+  // that ran up and is fading gets flagged before it round-trips back to breakeven or a loss.
+  const trailArmPct = pos.trailArmPct != null ? pos.trailArmPct : 15;
+  const trailGivebackPct = pos.trailGivebackPct != null ? pos.trailGivebackPct : 30;
+  const trailArmed = peakPnlPct != null && peakPnlPct >= trailArmPct;
+  const trailFloor = trailArmed ? peakPnlPct * (1 - trailGivebackPct/100) : null;
+  const trailTriggered = trailArmed && pnlPct != null && pnlPct <= trailFloor;
 
   if(pnlPct!=null && pnlPct >= pos.tpPct){
     verdict = 'Close — take-profit target reached';
@@ -307,6 +294,11 @@ function evaluate(pos, entry){
     verdict = 'Close — stop-loss triggered';
     cls = 'close-loss'; tagCls='loss';
     detail = `At $${fmt(mark)}, down ${fmt(pnlPct,1)}% — at or past your $${fmt(slPrice)} stop.`;
+  } else if(trailTriggered){
+    verdict = 'Close — trailing stop (protecting gains)';
+    cls = 'close-win'; tagCls='trail';
+    const givebackActual = peakPnlPct > 0 ? (1 - pnlPct/peakPnlPct)*100 : 0;
+    detail = `Peaked at +${fmt(peakPnlPct,1)}%, now ${pnlPct>=0?'+':''}${fmt(pnlPct,1)}% — a ${fmt(givebackActual,0)}% giveback from the high, past your ${trailGivebackPct}% trailing-stop rule. Consider locking in $${fmt(mark)} instead of riding it back toward the original stop.`;
   } else if(dte <= 10){
     verdict = 'Close / reassess — very close to expiration';
     cls = 'close-loss'; tagCls='caution';
@@ -321,13 +313,17 @@ function evaluate(pos, entry){
     detail = `${dte} days to expiration, currently $${fmt(mark)} (target $${fmt(tpPrice)} / stop $${fmt(slPrice)}). Sticking to the plan.`;
   }
 
+  if(moneyness){
+    detail += ` ${moneyness.state}${moneyness.state!=='ATM' ? ' by $'+fmt(moneyness.diff) : ''}.`;
+  }
+
   const spread = (entry.bid!=null && entry.ask!=null) ? (entry.ask - entry.bid) : null;
   const spreadPct = (spread!=null && mark) ? (spread/mark)*100 : null;
   let note = null;
   if(spreadPct!=null && spreadPct > 15){
     note = `Wide bid/ask spread (${fmt(spreadPct,0)}% of mark) — use a limit order, not market, if you act on this.`;
   }
-  return {mark, pnlPct, dte, verdict, cls, tagCls, detail, note};
+  return {mark, pnlPct, dte, moneyness, peakPnlPct, trailArmed, trailFloor, trailArmPct, trailGivebackPct, verdict, cls, tagCls, detail, note};
 }
 
 // Heuristic read on recent momentum in the logged data — not a prediction,
@@ -377,19 +373,7 @@ function render(){
   let html = `
     <h1>Position Log</h1>
     <p class="sub">Log the day's numbers for one option position and get a read on whether to close it or keep waiting.</p>
-    <div class="top-tabs">
-      <button class="top-tab ${state.view==='positions'?'active':''}" onclick="setView('positions')">Positions</button>
-      <button class="top-tab ${state.view==='account'?'active':''}" onclick="setView('account')">Account Size</button>
-    </div>`;
-
-  if(state.view === 'account'){
-    html += renderAccountView();
-    app.innerHTML = html;
-    if(state.accountLog.length) drawAccountChart();
-    return;
-  }
-
-  html += `<div class="positions-row">`;
+    <div class="positions-row">`;
 
   for(const id of ids){
     const p = state.positions[id];
@@ -400,6 +384,8 @@ function render(){
   }
   html += `<div class="btn-new" onclick="newPosition()">+ New position</div></div>`;
 
+  html += renderOutcomesCard();
+
   const pos = state.activeId ? state.positions[state.activeId] : null;
 
   if(!pos){
@@ -409,11 +395,40 @@ function render(){
   }
 
   const entries = sortEntries(state.entries[pos.id] || []);
+  const peakSeries = computePeakSeries(pos, entries);
   const latest = entries[entries.length-1];
-  const latestEval = latest ? evaluate(pos, latest) : null;
+  const latestPeak = peakSeries.length ? peakSeries[peakSeries.length-1] : null;
+  const latestEval = latest ? evaluate(pos, latest, latestPeak) : null;
   const adj = (entries.length && pos.status !== 'closed') ? computeAdjustment(pos, entries) : null;
   const sim = simCache[pos.id];
   const simIsCurrent = sim && !sim.error && latest && sim.runOnEntryKey === (latest.date + '|' + latest.time);
+
+  // Trailing-stop status line — shown whenever there's at least one entry, regardless of
+  // whether it has triggered yet, so you can see how far it is from arming/firing.
+  let trailStatus = null;
+  if(latest && pos.status !== 'closed'){
+    const trailArmPct = pos.trailArmPct != null ? pos.trailArmPct : 15;
+    const trailGivebackPct = pos.trailGivebackPct != null ? pos.trailGivebackPct : 30;
+    if(latestPeak == null){
+      trailStatus = `Not armed yet — no profitable checkpoints logged.`;
+    } else if(latestPeak < trailArmPct){
+      trailStatus = `Not armed yet — arms once P&L reaches +${fmt(trailArmPct,0)}% (peaked at ${latestPeak>=0?'+':''}${fmt(latestPeak,1)}% so far).`;
+    } else {
+      const floor = latestPeak * (1 - trailGivebackPct/100);
+      trailStatus = `Armed — peaked at +${fmt(latestPeak,1)}%, will trigger a close signal if P&L drops to ${floor>=0?'+':''}${fmt(floor,1)}% (a ${trailGivebackPct}% giveback from the high).`;
+    }
+  }
+
+  // IV context — compares the latest logged IV to the first logged IV for this position
+  // (a rough "entry IV"), so a stalling premium can be read as vol crush vs. no stock move.
+  let ivContext = null;
+  if(latest && latest.iv != null){
+    const firstWithIv = entries.find(e => e.iv != null);
+    if(firstWithIv && firstWithIv !== latest){
+      const ivDelta = latest.iv - firstWithIv.iv;
+      ivContext = `IV now ${fmt(latest.iv,1)}%, vs ${fmt(firstWithIv.iv,1)}% at first logged entry (${ivDelta>=0?'+':''}${fmt(ivDelta,1)} pts). ${Math.abs(ivDelta) >= 5 ? (ivDelta<0 ? 'A drop this size can stall premium even if the stock is cooperating.' : 'A rise this size can inflate premium even without much stock movement.') : ''}`;
+    }
+  }
 
   if(pos.status === 'closed'){
     html += `<div class="banner hold"><div class="verdict">Position closed</div>
@@ -437,6 +452,14 @@ function render(){
         <span class="adj-tag none">Monte Carlo context</span>
         <span class="adj-text">Your last simulation is from an earlier checkpoint — re-run it in the Predictive Targets card below for a current read.</span>
       </div>` : ''}
+      ${trailStatus ? `<div class="adj-line">
+        <span class="adj-tag ${latestEval.tagCls==='trail'?'trail':'info'}">Trailing stop</span>
+        <span class="adj-text">${trailStatus}</span>
+      </div>` : ''}
+      ${ivContext ? `<div class="adj-line">
+        <span class="adj-tag info">IV context</span>
+        <span class="adj-text">${ivContext}</span>
+      </div>` : ''}
     </div>`;
   } else {
     html += `<div class="banner hold"><div class="verdict">No entries yet</div>
@@ -459,14 +482,10 @@ function render(){
       <button class="ghost" onclick="editPosition('${pos.id}')">Edit position</button>
       ${pos.status==='closed'
         ? `<button class="ghost" onclick="reopenPosition('${pos.id}')">Reopen</button>`
-        : `<button class="ghost" onclick="showCloseForm('${pos.id}')">Mark closed</button>`}
+        : `<button class="ghost" onclick="closePosition('${pos.id}')">Mark closed</button>`}
       <button class="ghost danger" onclick="deletePosition('${pos.id}')">Delete position</button>
     </div>
   </div>`;
-
-  if(state._closingId === pos.id){
-    html += renderCloseForm(pos);
-  }
 
   if(pos.status !== 'closed'){
     html += renderPredictiveCard(pos, entries);
@@ -508,25 +527,29 @@ function render(){
     html += `<div class="empty">Nothing logged yet — add your first entry above.</div>`;
   } else {
     html += `<div class="tbl-wrap"><table><thead><tr>
-      <th>Date</th><th>Time</th><th>Stock</th><th>Bid</th><th>Ask</th><th>Mark</th>
-      <th>P&L</th><th>DTE</th><th>IV</th><th>Δ</th><th>Read</th><th></th>
+      <th>Date</th><th>Time</th><th>Stock</th><th>Moneyness</th><th>Bid</th><th>Ask</th><th>Mark</th>
+      <th>P&L</th><th>Peak</th><th>DTE</th><th>IV</th><th>Δ</th><th>Read</th><th></th>
     </tr></thead><tbody>`;
     for(let i=entries.length-1;i>=0;i--){
       const e = entries[i];
-      const ev = evaluate(pos, e);
+      const ev = evaluate(pos, e, peakSeries[i]);
       const pnlClass = ev.pnlPct==null ? '' : (ev.pnlPct>=0 ? 'pnl-pos':'pnl-neg');
+      const moneyTagCls = ev.moneyness ? (ev.moneyness.state==='ITM' ? 'itm' : ev.moneyness.state==='OTM' ? 'otm' : 'hold') : '';
+      const readLabel = ev.tagCls==='hold'?'Hold':ev.tagCls==='win'?'TP':ev.tagCls==='loss'?'SL/DTE':ev.tagCls==='trail'?'Trail':'Watch';
       html += `<tr>
         <td>${e.date}</td>
         <td>${e.time || '—'}</td>
         <td>${e.stockPrice!=null ? '$'+fmt(e.stockPrice) : '—'}</td>
+        <td>${ev.moneyness ? `<span class="tag ${moneyTagCls}">${ev.moneyness.state}</span>` : '—'}</td>
         <td>${e.bid!=null ? '$'+fmt(e.bid) : '—'}</td>
         <td>${e.ask!=null ? '$'+fmt(e.ask) : '—'}</td>
         <td>${ev.mark!=null ? '$'+fmt(ev.mark) : '—'}</td>
         <td class="${pnlClass}">${ev.pnlPct!=null ? (ev.pnlPct>=0?'+':'')+fmt(ev.pnlPct,1)+'%' : '—'}</td>
+        <td>${peakSeries[i]!=null ? (peakSeries[i]>=0?'+':'')+fmt(peakSeries[i],1)+'%' : '—'}</td>
         <td>${ev.dte}</td>
         <td>${e.iv!=null ? fmt(e.iv,1)+'%' : '—'}</td>
         <td>${e.delta!=null ? fmt(e.delta,2) : '—'}</td>
-        <td><span class="tag ${ev.tagCls}">${ev.tagCls==='hold'?'Hold':ev.tagCls==='win'?'TP':ev.tagCls==='loss'?'SL/DTE':'Watch'}</span></td>
+        <td><span class="tag ${ev.tagCls}">${readLabel}</span></td>
         <td><span class="del-x" onclick="deleteEntry('${pos.id}', ${i})" title="Delete entry">✕</span></td>
       </tr>`;
     }
@@ -537,6 +560,57 @@ function render(){
   app.innerHTML = html;
   if(entries.length) drawChart(pos, entries);
   if(simCache[pos.id] && !simCache[pos.id].error) drawHistogram(pos, simCache[pos.id]);
+}
+
+// Scans every closed position (they stay in state.positions with status:'closed' until
+// explicitly deleted) and summarizes outcomes using each one's last logged checkpoint.
+// Purely derived from existing data — no new storage bucket needed.
+function renderOutcomesCard(){
+  const closedIds = Object.keys(state.positions).filter(id => state.positions[id].status === 'closed');
+  if(!closedIds.length) return '';
+
+  let wins=0, losses=0, flat=0, totalPnl=0, pnlCount=0, totalDays=0, daysCount=0;
+  const rows = closedIds.map(id=>{
+    const pos = state.positions[id];
+    const entries = sortEntries(state.entries[id] || []);
+    const latest = entries[entries.length-1];
+    const pnlPct = latest ? computePnlPct(pos, latest) : null;
+    const closedDate = pos.closedDate || (latest ? latest.date : null);
+    const days = closedDate ? daysBetween(pos.entryDate, closedDate) : null;
+    if(pnlPct!=null){
+      pnlCount++; totalPnl += pnlPct;
+      if(pnlPct > 0) wins++; else if(pnlPct < 0) losses++; else flat++;
+    }
+    if(days!=null && !isNaN(days)){ totalDays += days; daysCount++; }
+    return {pos, pnlPct, days, closedDate};
+  }).sort((a,b) => (b.closedDate||'').localeCompare(a.closedDate||''));
+
+  const winRate = pnlCount ? (wins/pnlCount*100) : null;
+  const avgPnl = pnlCount ? (totalPnl/pnlCount) : null;
+  const avgDays = daysCount ? (totalDays/daysCount) : null;
+
+  const rowsHtml = rows.map(r=>{
+    const cls = r.pnlPct==null ? '' : (r.pnlPct>=0 ? 'pnl-pos':'pnl-neg');
+    return `<tr>
+      <td>${r.pos.ticker} $${r.pos.strike} ${r.pos.side}</td>
+      <td>${r.pos.entryDate}</td>
+      <td>${r.closedDate || '—'}</td>
+      <td>${r.days!=null && !isNaN(r.days) ? r.days : '—'}</td>
+      <td class="${cls}">${r.pnlPct!=null ? (r.pnlPct>=0?'+':'')+fmt(r.pnlPct,1)+'%' : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  return `<div class="card">
+    <h2>Closed-position track record</h2>
+    <div class="row3" style="margin-bottom:10px;">
+      <div><label>Win rate</label><div style="font-size:18px;font-weight:600;">${winRate!=null ? fmt(winRate,0)+'%' : '—'} <span style="color:var(--muted);font-size:12px;">(${wins}W / ${losses}L${flat ? ` / ${flat} flat` : ''})</span></div></div>
+      <div><label>Avg P&L per closed trade</label><div style="font-size:18px;font-weight:600;" class="${avgPnl!=null && avgPnl>=0 ? 'pnl-pos':'pnl-neg'}">${avgPnl!=null ? (avgPnl>=0?'+':'')+fmt(avgPnl,1)+'%' : '—'}</div></div>
+      <div><label>Avg days held</label><div style="font-size:18px;font-weight:600;">${avgDays!=null ? fmt(avgDays,0) : '—'}</div></div>
+    </div>
+    <div class="tbl-wrap"><table><thead><tr>
+      <th>Position</th><th>Entered</th><th>Closed</th><th>Days</th><th>Final P&L</th>
+    </tr></thead><tbody>${rowsHtml}</tbody></table></div>
+  </div>`;
 }
 
 function renderSetupForm(existing){
@@ -563,6 +637,11 @@ function renderSetupForm(existing){
       <div class="field"><label>Take-profit target (%)</label><input type="number" step="1" id="s-tp" value="${p.tpPct||60}"></div>
       <div class="field"><label>Stop-loss (%, negative)</label><input type="number" step="1" id="s-sl" value="${p.slPct||-35}"></div>
     </div>
+    <div class="row2">
+      <div class="field"><label>Trailing stop arms at (+% P&L)</label><input type="number" step="1" id="s-trail-arm" value="${p.trailArmPct!=null?p.trailArmPct:15}"></div>
+      <div class="field"><label>Trailing stop giveback (% of peak gain)</label><input type="number" step="1" id="s-trail-giveback" value="${p.trailGivebackPct!=null?p.trailGivebackPct:30}"></div>
+    </div>
+    <div class="adj-text" style="margin-bottom:10px;">Once P&L reaches the arm level, a close signal fires if it later gives back this % of the peak gain — independent of your original TP/SL. Defaults: arm at +15%, give back 30% of the peak.</div>
     <button class="primary" onclick="savePosition(${existing?`'${p.id}'`:'null'})">${existing?'Save changes':'Start tracking'}</button>
     ${existing ? `<button class="ghost" style="margin-left:8px;" onclick="cancelEdit()">Cancel</button>` : ''}
   </div>`;
@@ -849,6 +928,8 @@ async function savePosition(existingId){
   const entryPremium = parseFloat(document.getElementById('s-premium').value);
   const tpPct = parseFloat(document.getElementById('s-tp').value);
   const slPct = parseFloat(document.getElementById('s-sl').value);
+  const trailArmInput = parseFloat(document.getElementById('s-trail-arm').value);
+  const trailGivebackInput = parseFloat(document.getElementById('s-trail-giveback').value);
 
   if(!ticker || !expiration || !entryDate || isNaN(entryPremium)){
     alert('Please fill in at least ticker, expiration, entry date, and entry premium.');
@@ -859,7 +940,10 @@ async function savePosition(existingId){
   state.positions[id] = {
     id, ticker, side, strike, expiration, entryDate, contracts,
     entryPremium, tpPct, slPct,
-    status: (state.positions[id] && state.positions[id].status) || 'open'
+    trailArmPct: isNaN(trailArmInput) ? 15 : trailArmInput,
+    trailGivebackPct: isNaN(trailGivebackInput) ? 30 : trailGivebackInput,
+    status: (state.positions[id] && state.positions[id].status) || 'open',
+    closedDate: (state.positions[id] && state.positions[id].closedDate) || null
   };
   if(!state.entries[id]) state.entries[id] = [];
   if(!state.historical[id]) state.historical[id] = [];
@@ -878,58 +962,17 @@ async function deletePosition(id){
   try{ await S.delete('historical:' + id, false); }catch(e){}
   const ids = Object.keys(state.positions);
   state.activeId = ids[0] || null;
-  if(state._closingId === id) state._closingId = null;
   await savePositions();
   await saveActiveId();
   render();
 }
 
-function showCloseForm(id){
-  state._closingId = id;
-  render();
-}
-function cancelClose(){
-  state._closingId = null;
-  render();
-}
-function renderCloseForm(pos){
-  return `<div class="card">
-    <h2>Close position</h2>
-    <div class="row3">
-      <div class="field"><label>Exit date</label><input type="date" id="close-date" value="${todayStr()}"></div>
-      <div class="field"><label>Exit price (mark, $/share)</label><input type="number" step="0.01" id="close-price" placeholder="e.g. 0.32"></div>
-      <div class="field" style="display:flex;align-items:flex-end;">
-        <button class="primary" style="margin-top:0;width:100%;" onclick="confirmClosePosition('${pos.id}')">Confirm close</button>
-      </div>
-    </div>
-    <button class="ghost" onclick="cancelClose()">Cancel</button>
-  </div>`;
-}
-
-async function confirmClosePosition(id){
-  const pos = state.positions[id];
-  const exitDate = document.getElementById('close-date').value || todayStr();
-  const exitPrice = parseFloat(document.getElementById('close-price').value);
-  if(isNaN(exitPrice)){ alert('Enter the price you exited at.'); return; }
-
-  const perShare = exitPrice - pos.entryPremium;
-  const realizedPL = perShare * pos.contracts * 100;
-  const realizedPct = pos.entryPremium ? (perShare/pos.entryPremium)*100 : null;
-
-  state.tradeHistory.push({
-    id: uid(), positionId: id, ticker: pos.ticker, side: pos.side, strike: pos.strike,
-    expiration: pos.expiration, entryDate: pos.entryDate, exitDate,
-    entryPremium: pos.entryPremium, exitPremium: exitPrice, contracts: pos.contracts,
-    realizedPL, realizedPct
-  });
-  await saveTradeHistory();
-
-  pos.status = 'closed';
-  state._closingId = null;
+async function closePosition(id){
+  state.positions[id].status = 'closed';
+  if(!state.positions[id].closedDate) state.positions[id].closedDate = todayStr();
   await savePositions();
   render();
 }
-
 async function reopenPosition(id){
   state.positions[id].status = 'open';
   await savePositions();
@@ -1140,428 +1183,6 @@ function drawHistogram(pos, result){
 
   ctx.strokeStyle = '#ff6b6b';
   ctx.beginPath(); ctx.moveTo(xAt(result.sl), pad); ctx.lineTo(xAt(result.sl), pad+plotH); ctx.stroke();
-}
-
-function sortAccountLog(){
-  return state.accountLog.slice().sort((a,b)=> a.date < b.date ? -1 : (a.date > b.date ? 1 : 0));
-}
-
-let sizeCalcResult = null; // transient, not persisted
-
-function renderPositionSizeCalc(latestAcct){
-  const defaultAccount = latestAcct ? latestAcct.value : '';
-  let body = `<div class="row3">
-    <div class="field"><label>Account size ($)</label><input type="number" step="0.01" id="calc-account" value="${defaultAccount}" placeholder="e.g. 374.61"></div>
-    <div class="field"><label>Max risk per trade (%)</label><input type="number" step="0.1" id="calc-risk-pct" value="2"></div>
-    <div class="field"><label>Contract multiplier</label><input type="number" step="1" id="calc-mult" value="100"></div>
-  </div>
-  <div class="row3">
-    <div class="field"><label>Entry price (premium, $/share)</label><input type="number" step="0.01" id="calc-entry" placeholder="e.g. 0.20"></div>
-    <div class="field"><label>Stop-loss price ($/share)</label><input type="number" step="0.01" id="calc-stop" placeholder="e.g. 0.13"></div>
-    <div class="field" style="display:flex;align-items:flex-end;">
-      <button class="primary" style="margin-top:0;width:100%;" onclick="calcPositionSize()">Calculate</button>
-    </div>
-  </div>`;
-
-  if(sizeCalcResult){
-    const r = sizeCalcResult;
-    if(r.error){
-      body += `<div class="empty" style="margin-top:6px;">${r.error}</div>`;
-    } else {
-      const overCap = r.contracts === 0;
-      body += `
-        <div class="row3" style="margin-top:14px;">
-          <div><label>Max $ risk allowed</label><div style="font-size:18px;font-weight:600;padding:4px 0;">$${fmt(r.maxRisk)}</div></div>
-          <div><label>Risk per contract</label><div style="font-size:18px;font-weight:600;padding:4px 0;">$${fmt(r.riskPerContract)}</div></div>
-          <div><label>Recommended contracts</label><div style="font-size:18px;font-weight:600;padding:4px 0;${overCap?'color:var(--red);':''}">${r.contracts}</div></div>
-        </div>
-        <div class="row3">
-          <div><label>Total capital deployed</label><div style="padding:4px 0;color:var(--muted);">$${fmt(r.totalCost)}</div></div>
-          <div><label>% of account deployed</label><div style="padding:4px 0;color:var(--muted);">${fmt(r.pctDeployed,1)}%</div></div>
-          <div><label>If just 1 contract</label><div style="padding:4px 0;color:var(--muted);">$${fmt(r.riskPerContract)} risk (${fmt(r.oneContractPct,1)}% of account)</div></div>
-        </div>
-        ${overCap ? `<div class="adj-text" style="margin-top:6px;color:var(--red);">
-          Even 1 contract risks ${fmt(r.oneContractPct,1)}% of your account — above your ${r.riskPct}% target. Consider a
-          cheaper contract, a tighter stop, or accepting the extra risk deliberately rather than by default.
-        </div>` : `<div class="adj-text" style="margin-top:6px;">
-          Based on the three-step method: cap your dollar risk at ${r.riskPct}% of account, size to your stop distance,
-          and let that set the contract count — not the other way around.
-        </div>`}
-      `;
-    }
-  }
-
-  return `<div class="card">
-    <h2>Position size calculator</h2>
-    ${body}
-  </div>`;
-}
-
-function calcPositionSize(){
-  const account = parseFloat(document.getElementById('calc-account').value);
-  const riskPct = parseFloat(document.getElementById('calc-risk-pct').value);
-  const mult = parseFloat(document.getElementById('calc-mult').value) || 100;
-  const entry = parseFloat(document.getElementById('calc-entry').value);
-  const stop = parseFloat(document.getElementById('calc-stop').value);
-
-  if(isNaN(account) || account <= 0){ sizeCalcResult = {error:'Enter a valid account size.'}; render(); return; }
-  if(isNaN(riskPct) || riskPct <= 0){ sizeCalcResult = {error:'Enter a valid max risk percentage.'}; render(); return; }
-  if(isNaN(entry) || isNaN(stop)){ sizeCalcResult = {error:'Enter both an entry price and a stop-loss price.'}; render(); return; }
-  if(stop >= entry){ sizeCalcResult = {error:'Stop-loss price should be below entry price (this assumes buying calls/puts long).'}; render(); return; }
-
-  const maxRisk = account * (riskPct/100);
-  const riskPerContract = (entry - stop) * mult;
-  const contracts = Math.floor(maxRisk / riskPerContract);
-  const totalCost = contracts * entry * mult;
-  const pctDeployed = account ? (totalCost/account)*100 : 0;
-  const oneContractRiskPct = account ? (riskPerContract/account)*100 : 0;
-
-  sizeCalcResult = {maxRisk, riskPerContract, contracts, totalCost, pctDeployed, riskPct, oneContractPct: oneContractRiskPct};
-  render();
-}
-
-function renderMonthlyGoalCard(){
-  const trades = state.tradeHistory || [];
-  const MIN_TRADES = 5;
-
-  if(trades.length < MIN_TRADES){
-    return `<div class="card">
-      <h2>Monthly goal (from your trading history)</h2>
-      <div class="empty">Log at least ${MIN_TRADES} closed trades with an exit price to get a data-driven monthly goal
-        — currently have ${trades.length}. Use "Mark closed" on a position and enter what you actually exited at to build this.</div>
-    </div>`;
-  }
-
-  const wins = trades.filter(t=>t.realizedPL>0).length;
-  const winRate = (wins/trades.length)*100;
-  const avgPL = trades.reduce((a,t)=>a+t.realizedPL,0)/trades.length;
-  const avgPct = trades.reduce((a,t)=>a+(t.realizedPct||0),0)/trades.length;
-
-  const entryDates = trades.map(t=>new Date(t.entryDate)).sort((a,b)=>a-b);
-  const exitDates = trades.map(t=>new Date(t.exitDate)).sort((a,b)=>a-b);
-  const daySpan = Math.max(1, Math.round((exitDates[exitDates.length-1] - entryDates[0]) / 86400000));
-  const monthsSpan = Math.max(daySpan/30, 7/30); // floor at ~1 week so early data doesn't explode the pace
-  const tradesPerMonth = trades.length / monthsSpan;
-  const monthlyDollarGoal = avgPL * tradesPerMonth;
-
-  const acctLog = sortAccountLog();
-  const latestAcct = acctLog[acctLog.length-1];
-  const monthlyPctGoal = latestAcct && latestAcct.value ? (monthlyDollarGoal/latestAcct.value)*100 : null;
-  const goalClass = monthlyDollarGoal >= 0 ? 'pnl-pos' : 'pnl-neg';
-
-  return `<div class="card">
-    <h2>Monthly goal (from your trading history)</h2>
-    <div class="row3">
-      <div><label>Trades logged</label><div style="padding:4px 0;">${trades.length}</div></div>
-      <div><label>Win rate</label><div style="padding:4px 0;">${fmt(winRate,0)}%</div></div>
-      <div><label>Avg result per trade</label><div class="${avgPL>=0?'pnl-pos':'pnl-neg'}" style="padding:4px 0;">
-        ${avgPL>=0?'+':''}$${fmt(Math.abs(avgPL))} (${avgPct>=0?'+':''}${fmt(avgPct,1)}%)</div></div>
-    </div>
-    <div class="row3">
-      <div><label>Your pace (trades/month)</label><div style="padding:4px 0;color:var(--muted);">${fmt(tradesPerMonth,1)}</div></div>
-      <div><label>Suggested monthly goal</label><div class="${goalClass}" style="font-size:18px;font-weight:600;padding:4px 0;">
-        ${monthlyDollarGoal>=0?'+':''}$${fmt(Math.abs(monthlyDollarGoal))}</div></div>
-      <div><label>As % of account</label><div style="padding:4px 0;color:var(--muted);">
-        ${monthlyPctGoal!=null ? (monthlyPctGoal>=0?'+':'')+fmt(monthlyPctGoal,1)+'%' : 'log an account value to see this'}</div></div>
-    </div>
-    <div class="adj-text" style="margin-top:6px;">
-      This is your own historical average result per trade, times your own historical trading pace — not a forecast,
-      and not a target to force. With ${trades.length} trades logged it can still swing a lot from one closed trade
-      to the next; it should get steadier the more you log, and it'll shift automatically as your results do.
-    </div>
-  </div>`;
-}
-
-function renderTradeHistoryCard(){
-  const trades = (state.tradeHistory||[]).slice().sort((a,b)=> a.exitDate < b.exitDate ? -1 : 1);
-  let body = '';
-  if(!trades.length){
-    body = `<div class="empty">No closed trades yet.</div>`;
-  } else {
-    body = `<div class="tbl-wrap"><table><thead><tr>
-      <th>Ticker</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th><th>Contracts</th><th>P&L</th>
-    </tr></thead><tbody>`;
-    for(let i=trades.length-1;i>=0;i--){
-      const t = trades[i];
-      const plClass = t.realizedPL>=0 ? 'pnl-pos' : 'pnl-neg';
-      body += `<tr>
-        <td>${t.ticker} ${t.side} $${t.strike}</td>
-        <td>${t.entryDate}</td>
-        <td>${t.exitDate}</td>
-        <td>$${fmt(t.entryPremium)}</td>
-        <td>$${fmt(t.exitPremium)}</td>
-        <td>${t.contracts}</td>
-        <td class="${plClass}">${t.realizedPL>=0?'+':''}$${fmt(Math.abs(t.realizedPL))} (${t.realizedPct>=0?'+':''}${fmt(t.realizedPct,1)}%)</td>
-      </tr>`;
-    }
-    body += `</tbody></table></div>`;
-  }
-  return `<div class="card"><h2>Closed trade history</h2>${body}</div>`;
-}
-
-function renderAccountView(){
-  const log = sortAccountLog();
-  const latest = log[log.length-1];
-  const first = log[0];
-
-  let summary = '';
-  if(latest){
-    const changeVal = first ? latest.value - first.value : null;
-    const changePct = first && first.value ? (changeVal/first.value)*100 : null;
-    const changeClass = changeVal==null ? '' : (changeVal>=0 ? 'pnl-pos':'pnl-neg');
-    const breakdown = (latest.components && latest.components.length) ? `
-      <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08);">
-        ${latest.components.map(c => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--muted);">
-          <span>${c.label}</span><span>$${fmt(c.value)} (${latest.value ? fmt((c.value/latest.value)*100,1) : '0.0'}%)</span>
-        </div>`).join('')}
-      </div>` : '';
-    summary = `<div class="card">
-      <h2>Overview</h2>
-      <div class="row3">
-        <div><label>Current account size</label><div style="font-size:20px;font-weight:600;padding:4px 0;">$${fmt(latest.value)}</div></div>
-        <div><label>Change since first logged</label><div class="${changeClass}" style="font-size:18px;font-weight:600;padding:4px 0;">
-          ${changeVal!=null ? (changeVal>=0?'+':'')+'$'+fmt(Math.abs(changeVal))+' ('+(changePct>=0?'+':'')+fmt(changePct,1)+'%)' : '—'}
-        </div></div>
-        <div><label>1% of current value</label><div style="font-size:18px;font-weight:600;padding:4px 0;">$${fmt(latest.value*0.01)}</div></div>
-      </div>
-      <div class="adj-text" style="margin-top:4px;">
-        That last figure is a quick reference for your year-end contribution-increase rule — next year's weekly VOO
-        contribution is meant to go up by 1% of whatever the account is worth at that year's close, not today's value.
-      </div>
-      ${breakdown}
-    </div>`;
-  }
-
-  const calcCard = renderPositionSizeCalc(latest);
-  const goalsCard = renderGoalsCard(latest);
-
-  // Seed today's form with yesterday's component labels (blank values) for convenience,
-  // or two blank rows if nothing's been logged with a breakdown yet.
-  const seedComponents = (latest && latest.components && latest.components.length)
-    ? latest.components.map(c => ({label:c.label, value:''}))
-    : [{label:'',value:''},{label:'',value:''}];
-  acctRowCount = seedComponents.length - 1;
-
-  const form = `<div class="card">
-    <h2>Log account size</h2>
-    <div class="row2" style="margin-bottom:10px;">
-      <div class="field"><label>Date</label><input type="date" id="acct-date" value="${todayStr()}"></div>
-      <div class="field"><label>Notes (optional)</label><input type="text" id="acct-notes" placeholder="e.g. after this week's VOO buy"></div>
-    </div>
-    <label>Breakdown — what's contributing to the total</label>
-    <div id="acct-components-container">
-      ${seedComponents.map((c,i)=>acctComponentRowHTML(i, c.label, c.value)).join('')}
-    </div>
-    <div class="foot-actions" style="margin-bottom:8px;">
-      <button class="ghost" onclick="addAcctComponentRow()">+ Add component</button>
-    </div>
-    <div style="font-size:14px;font-weight:600;margin-bottom:10px;">Total: $<span id="acct-total-preview">0.00</span></div>
-    <button class="primary" onclick="addAccountEntry()">Add entry</button>
-  </div>`;
-
-  let chartCard = `<div class="card"><h2>Account size over time</h2>
-    ${log.length ? '<canvas id="acct-chart"></canvas>' : '<div class="empty">No entries logged yet.</div>'}
-  </div>`;
-
-  let historyCard = `<div class="card"><h2>History</h2>`;
-  if(!log.length){
-    historyCard += `<div class="empty">Nothing logged yet — add your first entry above.</div>`;
-  } else {
-    historyCard += `<div class="tbl-wrap"><table><thead><tr>
-      <th>Date</th><th>Value</th><th>Change</th><th>Breakdown</th><th>Notes</th><th></th>
-    </tr></thead><tbody>`;
-    for(let i=log.length-1;i>=0;i--){
-      const e = log[i];
-      const prev = log[i-1];
-      const change = prev ? e.value - prev.value : null;
-      const changePct = prev && prev.value ? (change/prev.value)*100 : null;
-      const changeClass = change==null ? '' : (change>=0?'pnl-pos':'pnl-neg');
-      const breakdownText = (e.components && e.components.length)
-        ? e.components.map(c=>`${c.label}: $${fmt(c.value)}`).join(', ')
-        : '—';
-      historyCard += `<tr>
-        <td>${e.date}</td>
-        <td>$${fmt(e.value)}</td>
-        <td class="${changeClass}">${change!=null ? (change>=0?'+':'')+'$'+fmt(Math.abs(change))+' ('+(changePct>=0?'+':'')+fmt(changePct,1)+'%)' : '—'}</td>
-        <td style="color:var(--muted);">${breakdownText}</td>
-        <td style="color:var(--muted);">${e.notes||'—'}</td>
-        <td><span class="del-x" onclick="deleteAccountEntry('${e.date}')" title="Delete entry">✕</span></td>
-      </tr>`;
-    }
-    historyCard += `</tbody></table></div>`;
-  }
-  historyCard += `</div>`;
-
-  return summary + goalsCard + renderMonthlyGoalCard() + calcCard + form + chartCard + historyCard + renderTradeHistoryCard();
-}
-
-let acctRowCount = 0;
-
-function acctComponentRowHTML(idx, label='', value=''){
-  return `<div class="row2" id="acct-comp-row-${idx}" style="margin-bottom:6px;">
-    <div class="field"><input type="text" class="acct-comp-label" placeholder="e.g. VOO" value="${label}"></div>
-    <div class="field" style="display:flex;gap:6px;">
-      <input type="number" step="0.01" class="acct-comp-value" placeholder="e.g. 250.00" value="${value}" oninput="updateAcctTotalPreview()" style="flex:1;">
-      <button class="ghost danger" style="padding:8px 10px;" onclick="removeAcctComponentRow(${idx})">✕</button>
-    </div>
-  </div>`;
-}
-
-function addAcctComponentRow(){
-  acctRowCount++;
-  document.getElementById('acct-components-container').insertAdjacentHTML('beforeend', acctComponentRowHTML(acctRowCount));
-  updateAcctTotalPreview();
-}
-
-function removeAcctComponentRow(idx){
-  const el = document.getElementById('acct-comp-row-'+idx);
-  if(el) el.remove();
-  updateAcctTotalPreview();
-}
-
-function updateAcctTotalPreview(){
-  const values = document.querySelectorAll('#acct-components-container .acct-comp-value');
-  let total = 0;
-  values.forEach(v => { const n = parseFloat(v.value); if(!isNaN(n)) total += n; });
-  const el = document.getElementById('acct-total-preview');
-  if(el) el.textContent = fmt(total);
-}
-
-function collectAcctComponents(){
-  const labels = document.querySelectorAll('#acct-components-container .acct-comp-label');
-  const values = document.querySelectorAll('#acct-components-container .acct-comp-value');
-  const components = [];
-  for(let i=0;i<labels.length;i++){
-    const label = labels[i].value.trim();
-    const val = parseFloat(values[i].value);
-    if(label && !isNaN(val)) components.push({label, value: val});
-  }
-  return components;
-}
-
-const DEFAULT_ACCOUNT_GOALS = [500, 1000, 2500, 5000, 10000, 25000, 50000];
-
-function findGoalAchievedDate(goal, log){
-  const hit = log.find(e => e.value >= goal);
-  return hit ? hit.date : null;
-}
-
-function renderGoalsCard(latest){
-  const log = sortAccountLog();
-  const currentValue = latest ? latest.value : 0;
-  const goals = (state.goalsCustomized ? state.accountGoals : DEFAULT_ACCOUNT_GOALS).slice().sort((a,b)=>a-b);
-
-  let rows = '';
-  if(!log.length){
-    rows = `<div class="empty">Log at least one account value to track progress toward these.</div>`;
-  } else {
-    goals.forEach(g=>{
-      const achievedDate = findGoalAchievedDate(g, log);
-      const pct = Math.min(100, Math.max(0,(currentValue/g)*100));
-      rows += `<div style="margin-bottom:12px;">
-        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;">
-          <span>$${fmt(g,0)}</span>
-          <span style="color:${achievedDate?'var(--green)':'var(--muted)'};">
-            ${achievedDate ? 'Reached ' + achievedDate : '$' + fmt(Math.max(g-currentValue,0),0) + ' to go'}
-          </span>
-          <span class="del-x" onclick="removeAcctGoal(${g})" title="Remove milestone">✕</span>
-        </div>
-        <div style="background:var(--card-2);border-radius:6px;height:8px;overflow:hidden;">
-          <div style="width:${pct}%;height:100%;background:${achievedDate?'var(--green)':'var(--accent)'};"></div>
-        </div>
-      </div>`;
-    });
-  }
-
-  return `<div class="card">
-    <h2>Milestones</h2>
-    ${rows}
-    <div class="row2" style="margin-top:6px;">
-      <div class="field"><input type="number" step="1" id="new-goal-amount" placeholder="e.g. 750"></div>
-      <div class="field"><button class="ghost" style="width:100%;" onclick="addAcctGoal()">Add milestone</button></div>
-    </div>
-  </div>`;
-}
-
-async function ensureGoalsCustomized(){
-  if(!state.goalsCustomized){
-    state.accountGoals = [...DEFAULT_ACCOUNT_GOALS];
-    state.goalsCustomized = true;
-  }
-}
-
-async function addAcctGoal(){
-  const val = parseFloat(document.getElementById('new-goal-amount').value);
-  if(isNaN(val) || val <= 0){ alert('Enter a valid milestone amount.'); return; }
-  await ensureGoalsCustomized();
-  if(!state.accountGoals.includes(val)) state.accountGoals.push(val);
-  await saveAccountGoals();
-  render();
-}
-
-async function removeAcctGoal(val){
-  await ensureGoalsCustomized();
-  state.accountGoals = state.accountGoals.filter(g => g !== val);
-  await saveAccountGoals();
-  render();
-}
-
-async function addAccountEntry(){
-  const date = document.getElementById('acct-date').value || todayStr();
-  const notes = document.getElementById('acct-notes').value.trim();
-  const components = collectAcctComponents();
-  if(!components.length){ alert('Enter at least one component with a label and a value.'); return; }
-  const value = components.reduce((a,c)=>a+c.value,0);
-
-  const existingIdx = state.accountLog.findIndex(e => e.date === date);
-  const entry = {date, value, components, notes: notes || null};
-  if(existingIdx >= 0) state.accountLog[existingIdx] = entry;
-  else state.accountLog.push(entry);
-
-  await saveAccountLog();
-  render();
-}
-
-async function deleteAccountEntry(date){
-  state.accountLog = state.accountLog.filter(e => e.date !== date);
-  await saveAccountLog();
-  render();
-}
-
-function drawAccountChart(){
-  const canvas = document.getElementById('acct-chart');
-  if(!canvas) return;
-  const log = sortAccountLog();
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth, h = 160;
-  canvas.width = w*dpr; canvas.height = h*dpr;
-  const ctx = canvas.getContext('2d');
-  ctx.scale(dpr,dpr);
-  ctx.clearRect(0,0,w,h);
-
-  const values = log.map(e=>e.value);
-  const min = Math.min(...values), max = Math.max(...values);
-  const range = (max-min) || 1;
-  const pad = 16, plotW = w-pad*2, plotH = h-pad*2;
-
-  function xAt(i){ return pad + (log.length<=1 ? 0 : (i/(log.length-1))*plotW); }
-  function yAt(v){ return pad + plotH - ((v-min)/range)*plotH; }
-
-  ctx.strokeStyle = '#3ddc97';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  log.forEach((e,i)=>{
-    const x = xAt(i), y = yAt(e.value);
-    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-  });
-  ctx.stroke();
-
-  log.forEach((e,i)=>{
-    ctx.fillStyle = '#3ddc97';
-    ctx.beginPath();
-    ctx.arc(xAt(i), yAt(e.value), 3, 0, Math.PI*2);
-    ctx.fill();
-  });
 }
 
 function drawChart(pos, entries){
