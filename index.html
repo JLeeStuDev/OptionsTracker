@@ -133,6 +133,15 @@
   .empty{color:var(--muted);text-align:center;padding:24px 0;font-size:13px;}
 
   canvas{width:100%;height:140px;display:block;}
+  .chart-wrap{position:relative;}
+  .chart-tooltip{
+    position:absolute;pointer-events:none;display:none;z-index:5;
+    background:#0d1117;border:1px solid var(--border);border-radius:6px;
+    padding:6px 9px;font-size:11.5px;line-height:1.45;color:var(--text);
+    white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,0.45);
+  }
+  .chart-tooltip .tt-title{font-weight:600;margin-bottom:2px;}
+  .chart-tooltip .tt-muted{color:var(--muted);}
 
   .foot-actions{display:flex;gap:8px;margin-top:4px;}
   .del-x{cursor:pointer;color:var(--muted);}
@@ -321,12 +330,13 @@ function computePeakSeries(pos, sortedEntries){
   });
 }
 
-function evaluate(pos, entry, peakPnlPct){
+function evaluate(pos, entry, peakPnlPct, sigmaPctForTheta){
   const mark = computeMark(entry.bid, entry.ask);
   const entryPrem = pos.entryPremium;
   const pnlPct = computePnlPct(pos, entry);
   const dte = daysBetween(entry.date, pos.expiration);
   const moneyness = computeMoneyness(pos, entry);
+  const thetaInfo = computeThetaInfo(pos, entry, dte, mark, sigmaPctForTheta);
   let verdict, cls, tagCls, detail;
 
   const tpPrice = priceFromPct(entryPrem, pos.tpPct);
@@ -342,6 +352,14 @@ function evaluate(pos, entry, peakPnlPct){
   const trailFloor = trailArmed ? peakPnlPct * (1 - trailGivebackPct/100) : null;
   const trailTriggered = trailArmed && pnlPct != null && pnlPct <= trailFloor;
 
+  // Decay trigger: fires when the stock move required to offset theta is large relative
+  // to the stock's own typical daily move (self-calibrating — scales with the contract's
+  // own IV, not a flat percentage) AND most of the price is still time value.
+  const decayMoveRatioThreshold = pos.decayMoveRatioThreshold != null ? pos.decayMoveRatioThreshold : 1.5;
+  const decayExtrinsicMinPct = pos.decayExtrinsicMinPct != null ? pos.decayExtrinsicMinPct : 60;
+  const decayTriggered = thetaInfo && thetaInfo.moveRatio != null && thetaInfo.extrinsicSharePct != null
+    && thetaInfo.moveRatio >= decayMoveRatioThreshold && thetaInfo.extrinsicSharePct >= decayExtrinsicMinPct;
+
   if(pnlPct!=null && pnlPct >= pos.tpPct){
     verdict = 'Close — take-profit target reached';
     cls = 'close-win'; tagCls='win';
@@ -355,6 +373,10 @@ function evaluate(pos, entry, peakPnlPct){
     cls = 'close-win'; tagCls='trail';
     const givebackActual = peakPnlPct > 0 ? (1 - pnlPct/peakPnlPct)*100 : 0;
     detail = `Peaked at +${fmt(peakPnlPct,1)}%, now ${pnlPct>=0?'+':''}${fmt(pnlPct,1)}% — a ${fmt(givebackActual,0)}% giveback from the high, past your ${trailGivebackPct}% trailing-stop rule. Consider locking in $${fmt(mark)} instead of riding it back toward the original stop.`;
+  } else if(decayTriggered){
+    verdict = 'Close / reassess — decay is outweighing the odds';
+    cls = 'close-loss'; tagCls='caution';
+    detail = `Theta needs a $${fmt(thetaInfo.requiredDailyMove)}/day move just to break even — that's ${fmt(thetaInfo.moveRatio,1)}x the stock's own typical day (~$${fmt(thetaInfo.expectedDailyMove)}, from ${fmt(thetaInfo.sigmaPctUsed,1)}% vol), and ${fmt(thetaInfo.extrinsicSharePct,0)}% of the price is still time value. The bar to just stay flat is now unusually high.`;
   } else if(dte <= 10){
     verdict = 'Close / reassess — very close to expiration';
     cls = 'close-loss'; tagCls='caution';
@@ -379,7 +401,46 @@ function evaluate(pos, entry, peakPnlPct){
   if(spreadPct!=null && spreadPct > 15){
     note = `Wide bid/ask spread (${fmt(spreadPct,0)}% of mark) — use a limit order, not market, if you act on this.`;
   }
-  return {mark, pnlPct, dte, moneyness, peakPnlPct, trailArmed, trailFloor, trailArmPct, trailGivebackPct, verdict, cls, tagCls, detail, note};
+  return {mark, pnlPct, dte, moneyness, peakPnlPct, trailArmed, trailFloor, trailArmPct, trailGivebackPct,
+    thetaInfo, decayTriggered, decayMoveRatioThreshold, decayExtrinsicMinPct, verdict, cls, tagCls, detail, note};
+}
+
+// Modeled $/day decay via Black-Scholes: reprices the same contract with one fewer day
+// to expiration, holding stock price and vol constant, and diffs the two theoretical
+// prices. Also converts theta into a "required daily move" via the option's own modeled
+// delta, and compares that to the stock's own typical daily move (from the same vol
+// input) — a self-calibrating ratio instead of an arbitrary flat percentage threshold.
+// Requires blackScholesPrice/blackScholesDelta (declared later as function statements,
+// so they're hoisted and safe to call here).
+function computeThetaInfo(pos, entry, dte, mark, sigmaPctOverride){
+  const sigmaPct = sigmaPctOverride != null ? sigmaPctOverride : entry.iv;
+  if(entry.stockPrice == null || sigmaPct == null || !dte || dte <= 0) return null;
+  const S = entry.stockPrice, K = pos.strike, sigma = sigmaPct/100, r = 0.045;
+  const T0 = dte/365;
+  const T1 = Math.max(dte-1, 0)/365;
+  const modelPrice0 = blackScholesPrice(S, K, T0, sigma, r, pos.side);
+  const modelPrice1 = blackScholesPrice(S, K, T1, sigma, r, pos.side);
+  const thetaPerDay = Math.max(modelPrice0 - modelPrice1, 0);
+  const intrinsic = pos.side === 'Call' ? Math.max(S-K, 0) : Math.max(K-S, 0);
+  const extrinsic = Math.max(modelPrice0 - intrinsic, 0);
+  const basisPrice = mark != null ? mark : modelPrice0;
+  const thetaPctOfMarkPerDay = basisPrice > 0 ? (thetaPerDay/basisPrice)*100 : null;
+  const extrinsicSharePct = modelPrice0 > 0 ? (extrinsic/modelPrice0)*100 : null;
+
+  // Required daily move: how much the stock needs to move (in $) for delta-driven gain
+  // to offset theta. Expected daily move: the stock's own ~1-sigma daily move, derived
+  // from the same vol input. moveRatio > 1 means you need a bigger-than-typical day just
+  // to tread water — and it scales automatically with the contract's own IV, unlike a
+  // fixed percentage.
+  const modelDelta = blackScholesDelta(S, K, T0, sigma, r, pos.side);
+  const dailyVolPct = sigma / Math.sqrt(365) * 100;
+  const expectedDailyMove = S * (dailyVolPct/100);
+  const requiredDailyMove = Math.abs(modelDelta) > 0.001 ? thetaPerDay/Math.abs(modelDelta) : null;
+  const moveRatio = (requiredDailyMove != null && expectedDailyMove > 0) ? requiredDailyMove/expectedDailyMove : null;
+
+  return {thetaPerDay, modelPrice0, intrinsic, extrinsic, thetaPctOfMarkPerDay, extrinsicSharePct,
+    sigmaPctUsed: sigmaPct, ivSource: sigmaPctOverride == null ? 'logged' : (entry.iv != null ? 'logged' : 'fallback'),
+    modelDelta, expectedDailyMove, requiredDailyMove, moveRatio};
 }
 
 // Heuristic read on recent momentum in the logged data — not a prediction,
@@ -464,7 +525,12 @@ function render(){
   const peakSeries = computePeakSeries(pos, entries);
   const latest = entries[entries.length-1];
   const latestPeak = peakSeries.length ? peakSeries[peakSeries.length-1] : null;
-  const latestEval = latest ? evaluate(pos, latest, latestPeak) : null;
+  // Fallback vol for theta modeling when a checkpoint has no logged IV — same historical-vol
+  // computation the Predictive Targets card uses, so the two stay consistent with each other.
+  const hvForTheta = computeHistoricalVol(trimHistorical(state.historical[pos.id] || [], pos.histLookbackDays));
+  const fallbackSigmaForTheta = hvForTheta ? hvForTheta.annualizedPct : null;
+  const sigmaForLatest = latest ? (latest.iv != null ? latest.iv : fallbackSigmaForTheta) : null;
+  const latestEval = latest ? evaluate(pos, latest, latestPeak, sigmaForLatest) : null;
   const adj = (entries.length && pos.status !== 'closed') ? computeAdjustment(pos, entries) : null;
   const sim = simCache[pos.id];
   const simIsCurrent = sim && !sim.error && latest && sim.runOnEntryKey === (latest.date + '|' + latest.time);
@@ -493,6 +559,19 @@ function render(){
     if(firstWithIv && firstWithIv !== latest){
       const ivDelta = latest.iv - firstWithIv.iv;
       ivContext = `IV now ${fmt(latest.iv,1)}%, vs ${fmt(firstWithIv.iv,1)}% at first logged entry (${ivDelta>=0?'+':''}${fmt(ivDelta,1)} pts). ${Math.abs(ivDelta) >= 5 ? (ivDelta<0 ? 'A drop this size can stall premium even if the stock is cooperating.' : 'A rise this size can inflate premium even without much stock movement.') : ''}`;
+    }
+  }
+
+  // Theta / decay context — modeled $/day burn and what share of the price is time value,
+  // shown regardless of whether it has crossed the close-trigger threshold, so you can see
+  // the trend before it fires.
+  let decayText = null;
+  if(latest && pos.status !== 'closed'){
+    const ti = latestEval ? latestEval.thetaInfo : null;
+    if(ti){
+      decayText = `Needs a $${fmt(ti.requiredDailyMove)}/day move just to offset theta (modeled delta ≈ ${fmt(Math.abs(ti.modelDelta),2)}) — that's ${ti.moveRatio!=null?fmt(ti.moveRatio,1)+'x':'—'} the stock's own typical day (~$${fmt(ti.expectedDailyMove)}, ${fmt(ti.sigmaPctUsed,1)}% vol, ${ti.ivSource==='logged'?'logged':'historical-vol fallback'}). About ${fmt(ti.extrinsicSharePct,0)}% of the modeled $${fmt(ti.modelPrice0)} price is time value, with ${latestEval.dte} days left — decay accelerates further as expiration nears.`;
+    } else {
+      decayText = `Log a stock price and an implied vol (or paste historical closes below) to see a modeled $/day decay estimate here.`;
     }
   }
 
@@ -525,6 +604,10 @@ function render(){
       ${ivContext ? `<div class="adj-line">
         <span class="adj-tag info">IV context</span>
         <span class="adj-text">${ivContext}</span>
+      </div>` : ''}
+      ${decayText ? `<div class="adj-line">
+        <span class="adj-tag ${latestEval.decayTriggered ? 'trail' : 'info'}" style="${latestEval.decayTriggered ? 'background:#2a1414;color:var(--red);' : ''}">Theta / decay</span>
+        <span class="adj-text">${decayText}</span>
       </div>` : ''}
     </div>`;
   } else {
@@ -588,7 +671,7 @@ function render(){
 
   html += `<div class="card">
     <h2>Premium over time</h2>
-    ${entries.length ? '<canvas id="chart"></canvas>' : '<div class="empty">No entries logged yet.</div>'}
+    ${entries.length ? '<div class="chart-wrap"><canvas id="chart"></canvas><div class="chart-tooltip" id="chart-tooltip"></div></div>' : '<div class="empty">No entries logged yet.</div>'}
   </div>`;
 
   html += `<div class="card">
@@ -602,7 +685,8 @@ function render(){
     </tr></thead><tbody>`;
     for(let i=entries.length-1;i>=0;i--){
       const e = entries[i];
-      const ev = evaluate(pos, e, peakSeries[i]);
+      const rowSigma = e.iv != null ? e.iv : fallbackSigmaForTheta;
+      const ev = evaluate(pos, e, peakSeries[i], rowSigma);
       const pnlClass = ev.pnlPct==null ? '' : (ev.pnlPct>=0 ? 'pnl-pos':'pnl-neg');
       const moneyTagCls = ev.moneyness ? (ev.moneyness.state==='ITM' ? 'itm' : ev.moneyness.state==='OTM' ? 'otm' : 'hold') : '';
       const readLabel = ev.tagCls==='hold'?'Hold':ev.tagCls==='win'?'TP':ev.tagCls==='loss'?'SL/DTE':ev.tagCls==='trail'?'Trail':'Watch';
@@ -628,7 +712,7 @@ function render(){
   html += `</div>`;
 
   app.innerHTML = html;
-  if(entries.length) drawChart(pos, entries);
+  if(entries.length) drawChart(pos, entries, peakSeries);
   if(simCache[pos.id] && !simCache[pos.id].error) drawHistogram(pos, simCache[pos.id]);
 }
 
@@ -661,6 +745,11 @@ function renderSetupForm(existing){
       <div class="field"><label>Trailing stop giveback (% of peak gain)</label><input type="number" step="1" id="s-trail-giveback" value="${p.trailGivebackPct!=null?p.trailGivebackPct:30}"></div>
     </div>
     <div class="adj-text" style="margin-bottom:10px;">Once P&L reaches the arm level, a close signal fires if it later gives back this % of the peak gain — independent of your original TP/SL. Defaults: arm at +15%, give back 30% of the peak.</div>
+    <div class="row2">
+      <div class="field"><label>Decay warning: required move ÷ typical move (×)</label><input type="number" step="0.1" id="s-decay-ratio" value="${p.decayMoveRatioThreshold!=null?p.decayMoveRatioThreshold:1.5}"></div>
+      <div class="field"><label>Decay warning min. time-value share (%)</label><input type="number" step="1" id="s-decay-extrinsic" value="${p.decayExtrinsicMinPct!=null?p.decayExtrinsicMinPct:60}"></div>
+    </div>
+    <div class="adj-text" style="margin-bottom:10px;">Flags a close/reassess signal when the stock move needed to offset theta is this many times the stock's own typical daily move (derived from its vol — scales with the contract, not a flat %) AND at least this much of the price is time value. Defaults: 1.5x, 60% time value.</div>
     <button class="primary" onclick="savePosition(${existing?`'${p.id}'`:'null'})">${existing?'Save changes':'Start tracking'}</button>
     ${existing ? `<button class="ghost" style="margin-left:8px;" onclick="cancelEdit()">Cancel</button>` : ''}
   </div>`;
@@ -819,30 +908,55 @@ function blackScholesPrice(S, K, T, sigma, r, side){
   return K*Math.exp(-r*T)*normCDF(-d2) - S*normCDF(-d1);
 }
 
-// Simulates the stock forward `horizonDays` (GBM), then reprices the option at each
-// simulated price using Black-Scholes with `remainingDays` left until actual expiration.
-// horizonDays === full DTE (remainingDays=0) reproduces plain expiration-payoff behavior.
+// Black-Scholes delta (analytic, from the same d1 used in blackScholesPrice). Used to
+// convert theta ($/day) into a required stock move ($/day) — no logged delta needed.
+function blackScholesDelta(S, K, T, sigma, r, side){
+  if(T <= 0 || sigma <= 0){
+    const itm = side==='Call' ? S > K : S < K;
+    return side==='Call' ? (itm?1:0) : (itm?-1:0);
+  }
+  const sqrtT = Math.sqrt(T);
+  const d1 = (Math.log(S/K) + (r + sigma*sigma/2)*T) / (sigma*sqrtT);
+  return side === 'Call' ? normCDF(d1) : normCDF(d1) - 1;
+}
+
+// Simulates the stock forward `horizonDays` (GBM), repricing the option at every step
+// (not just the end) with Black-Scholes using the correctly-shrinking time-to-expiration.
+// Tracks each path's running high and low, not just its terminal value, so the caller can
+// report "likely peak/trough reached at any point in the window" — distinct from, and
+// usually wider than, the terminal-outcome distribution.
 function runMonteCarlo(S0, strike, side, horizonDays, remainingDays, sigma, r, nPaths){
   const Thorizon = horizonDays/365;
   const Tremaining = remainingDays/365;
   const nSteps = Math.max(1, Math.min(horizonDays, 60));
   const dt = Thorizon/nSteps;
   const values = new Array(nPaths);
+  const maxValues = new Array(nPaths);
+  const minValues = new Array(nPaths);
   const samplePaths = [];
   const sampleCount = Math.min(25, nPaths);
   for(let p=0; p<nPaths; p++){
     let S = S0;
     const storeThis = p < sampleCount;
     const path = storeThis ? [S] : null;
+    let runningMax = blackScholesPrice(S, strike, Tremaining + Thorizon, sigma, r, side);
+    let runningMin = runningMax;
     for(let s=0; s<nSteps; s++){
       const Z = randn();
       S = S * Math.exp((r - 0.5*sigma*sigma)*dt + sigma*Math.sqrt(dt)*Z);
       if(storeThis) path.push(S);
+      const elapsedT = dt*(s+1);
+      const remainingT = Math.max(Thorizon - elapsedT, 0) + Tremaining;
+      const stepValue = blackScholesPrice(S, strike, remainingT, sigma, r, side);
+      if(stepValue > runningMax) runningMax = stepValue;
+      if(stepValue < runningMin) runningMin = stepValue;
     }
     if(storeThis) samplePaths.push(path);
     values[p] = blackScholesPrice(S, strike, Tremaining, sigma, r, side);
+    maxValues[p] = runningMax;
+    minValues[p] = runningMin;
   }
-  return {values, samplePaths, nSteps};
+  return {values, maxValues, minValues, samplePaths, nSteps};
 }
 
 function computePredictiveTargets(pos, entry, confidenceBand, rfRatePct, nPaths, sigmaPctOverride, horizonDaysOverride){
@@ -855,8 +969,14 @@ function computePredictiveTargets(pos, entry, confidenceBand, rfRatePct, nPaths,
   const remainingDays = dte - horizonDays;
   const sigma = sigmaPct/100;
   const r = rfRatePct/100;
-  const {values, samplePaths} = runMonteCarlo(entry.stockPrice, pos.strike, pos.side, horizonDays, remainingDays, sigma, r, nPaths);
+  const {values, maxValues, minValues, samplePaths} = runMonteCarlo(entry.stockPrice, pos.strike, pos.side, horizonDays, remainingDays, sigma, r, nPaths);
   const pctValues = values
+    .map(v => ((v - pos.entryPremium)/pos.entryPremium)*100)
+    .sort((a,b)=>a-b);
+  const maxPctValues = maxValues
+    .map(v => ((v - pos.entryPremium)/pos.entryPremium)*100)
+    .sort((a,b)=>a-b);
+  const minPctValues = minValues
     .map(v => ((v - pos.entryPremium)/pos.entryPremium)*100)
     .sort((a,b)=>a-b);
 
@@ -869,7 +989,15 @@ function computePredictiveTargets(pos, entry, confidenceBand, rfRatePct, nPaths,
   const mean = pctValues.reduce((a,b)=>a+b,0)/pctValues.length;
   const probProfit = (pctValues.filter(v=>v>0).length/pctValues.length)*100;
 
-  return {tp, sl, median, mean, probProfit, dte, horizonDays, remainingDays,
+  // "Likely peak/trough" — the best/worst point reached at ANY point during the horizon,
+  // not just where the price lands at the end. Framed one-sided at the same confidence
+  // level: likelyMaxReach is the value X% of paths reach or exceed at their high; 
+  // likelyMinReach is the value X% of paths reach or fall below at their low.
+  const likelyMaxReach = percentile(maxPctValues, 100-confidenceBand);
+  const likelyMinReachRaw = percentile(minPctValues, confidenceBand);
+  const likelyMinReach = Math.max(likelyMinReachRaw, -100);
+
+  return {tp, sl, median, mean, probProfit, likelyMaxReach, likelyMinReach, dte, horizonDays, remainingDays,
     sigmaPct: sigma*100, pctPayoffs: pctValues, samplePaths, S0: entry.stockPrice};
 }
 
@@ -949,6 +1077,8 @@ async function savePosition(existingId){
   const slPct = parseFloat(document.getElementById('s-sl').value);
   const trailArmInput = parseFloat(document.getElementById('s-trail-arm').value);
   const trailGivebackInput = parseFloat(document.getElementById('s-trail-giveback').value);
+  const decayRatioInput = parseFloat(document.getElementById('s-decay-ratio').value);
+  const decayExtrinsicInput = parseFloat(document.getElementById('s-decay-extrinsic').value);
 
   if(!ticker || !expiration || !entryDate || isNaN(entryPremium)){
     alert('Please fill in at least ticker, expiration, entry date, and entry premium.');
@@ -961,6 +1091,8 @@ async function savePosition(existingId){
     entryPremium, tpPct, slPct,
     trailArmPct: isNaN(trailArmInput) ? 15 : trailArmInput,
     trailGivebackPct: isNaN(trailGivebackInput) ? 30 : trailGivebackInput,
+    decayMoveRatioThreshold: isNaN(decayRatioInput) ? 1.5 : decayRatioInput,
+    decayExtrinsicMinPct: isNaN(decayExtrinsicInput) ? 60 : decayExtrinsicInput,
     status: (state.positions[id] && state.positions[id].status) || 'open'
   };
   if(!state.entries[id]) state.entries[id] = [];
@@ -1148,12 +1280,25 @@ function renderPredictiveCard(pos, entries){
             <div style="color:var(--muted);font-size:12px;">${fmt(result.sl,1)}% from entry</div></div>
           <div><label>Odds of profit at day ${result.horizonDays}</label><div style="font-size:18px;font-weight:600;padding:4px 0;">${fmt(result.probProfit,0)}%</div></div>
         </div>
+        <div class="row2">
+          <div><label>Likely peak within ${result.horizonDays}d (${result.band}% conf.)</label>
+            <div class="pnl-pos" style="font-size:16px;font-weight:600;padding:4px 0;">$${fmt(priceFromPct(pos.entryPremium, result.likelyMaxReach))}
+              <span style="color:var(--muted);font-size:12px;">(${result.likelyMaxReach>=0?'+':''}${fmt(result.likelyMaxReach,1)}%)</span></div></div>
+          <div><label>Likely trough within ${result.horizonDays}d (${result.band}% conf.)</label>
+            <div class="pnl-neg" style="font-size:16px;font-weight:600;padding:4px 0;">$${fmt(priceFromPct(pos.entryPremium, result.likelyMinReach))}
+              <span style="color:var(--muted);font-size:12px;">(${fmt(result.likelyMinReach,1)}%)</span></div></div>
+        </div>
+        <div class="adj-text" style="margin-top:4px;">
+          Peak/trough reflect the best and worst point the modeled price touches at ANY point within the ${result.horizonDays}-day window — even if it later
+          pulls back — not just where it lands at the end. That's usually a wider range than the Move TP/SL numbers above, which are the terminal (endpoint)
+          outcome distribution. Peak is more realistic for a "sell into a spike" plan; trough for "how bad can it look before recovering."
+        </div>
         <div class="row3">
           <div><label>Median outcome price</label><div style="padding:4px 0;color:var(--muted);">$${fmt(priceFromPct(pos.entryPremium, result.median))}</div></div>
           <div><label>Horizon / DTE used</label><div style="padding:4px 0;color:var(--muted);">${result.horizonDays}d of ${result.dte}d</div></div>
           <div><label>Volatility used</label><div style="padding:4px 0;color:var(--muted);">${fmt(result.sigmaPct,1)}%</div></div>
         </div>
-        <canvas id="sim-hist" style="margin-top:8px;"></canvas>
+        <div class="chart-wrap" style="margin-top:8px;"><canvas id="sim-hist"></canvas><div class="chart-tooltip" id="sim-hist-tooltip"></div></div>
         <button class="ghost" style="margin-top:8px;" onclick="applySuggestedTargets('${pos.id}')">Apply — move TP to $${fmt(tpPrice)}, SL to $${fmt(slPrice)}</button>
         <div class="adj-text" style="margin-top:10px;">
           ${result.remainingDays > 0
@@ -1195,6 +1340,61 @@ function renderPredictiveCard(pos, entries){
     <h2>Predictive targets (Monte Carlo)</h2>
     ${body}
   </div>`;
+}
+
+// --- Chart tooltips ---
+// Generic point-hover tooltip: finds the nearest {x,y,html} point to the cursor (by pixel
+// distance) and shows its html in the sibling tooltip div, clamped inside the canvas.
+function attachPointTooltip(canvas, tooltip, points){
+  if(!canvas || !tooltip) return;
+  canvas.onmousemove = (evt) => {
+    if(!points.length){ tooltip.style.display='none'; return; }
+    const rect = canvas.getBoundingClientRect();
+    const mx = evt.clientX - rect.left, my = evt.clientY - rect.top;
+    let nearest = points[0], nearestDist = Infinity;
+    for(const p of points){
+      const dist = Math.hypot(p.x-mx, (p.y!=null?p.y-my:0));
+      if(dist < nearestDist){ nearestDist = dist; nearest = p; }
+    }
+    if(nearestDist > 45){ tooltip.style.display='none'; return; }
+    tooltip.innerHTML = nearest.html;
+    tooltip.style.display = 'block';
+    let left = mx + 12, top = my - 10;
+    const maxLeft = canvas.clientWidth - tooltip.offsetWidth - 4;
+    if(left > maxLeft) left = mx - tooltip.offsetWidth - 12;
+    if(left < 0) left = 4;
+    const maxTop = canvas.clientHeight - tooltip.offsetHeight - 4;
+    if(top > maxTop) top = maxTop;
+    if(top < 0) top = 4;
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = top + 'px';
+  };
+  canvas.onmouseleave = () => { tooltip.style.display = 'none'; };
+}
+
+// Bar-hover tooltip for the histogram: maps cursor x to a bin range rather than a
+// nearest point, since bars (not discrete points) fill the whole plot width.
+function attachBarTooltip(canvas, tooltip, bins, pad, plotW, min, max, nBins, total){
+  if(!canvas || !tooltip) return;
+  canvas.onmousemove = (evt) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = evt.clientX - rect.left, my = evt.clientY - rect.top;
+    if(mx < pad || mx > pad+plotW){ tooltip.style.display='none'; return; }
+    let idx = Math.floor(((mx-pad)/plotW)*nBins);
+    if(idx < 0) idx = 0; if(idx >= nBins) idx = nBins-1;
+    const binMin = min + (idx/nBins)*(max-min);
+    const binMax = min + ((idx+1)/nBins)*(max-min);
+    const count = bins[idx];
+    const pct = total ? (count/total*100) : 0;
+    tooltip.innerHTML = `<div class="tt-title">${fmt(binMin,1)}% to ${fmt(binMax,1)}%</div><div class="tt-muted">${count} of ${total} paths (${fmt(pct,1)}%)</div>`;
+    tooltip.style.display = 'block';
+    let left = mx + 12;
+    const maxLeft = canvas.clientWidth - tooltip.offsetWidth - 4;
+    if(left > maxLeft) left = mx - tooltip.offsetWidth - 12;
+    tooltip.style.left = Math.max(left,4) + 'px';
+    tooltip.style.top = Math.max(my - 40, 4) + 'px';
+  };
+  canvas.onmouseleave = () => { tooltip.style.display = 'none'; };
 }
 
 function drawHistogram(pos, result){
@@ -1242,6 +1442,9 @@ function drawHistogram(pos, result){
 
   ctx.strokeStyle = '#ff6b6b';
   ctx.beginPath(); ctx.moveTo(xAt(result.sl), pad); ctx.lineTo(xAt(result.sl), pad+plotH); ctx.stroke();
+
+  const total = data.length;
+  attachBarTooltip(canvas, document.getElementById('sim-hist-tooltip'), bins, pad, plotW, min, max, nBins, total);
 }
 
 function sortAccountLog(){
@@ -1462,7 +1665,7 @@ function renderAccountView(){
   </div>`;
 
   let chartCard = `<div class="card"><h2>Account size over time</h2>
-    ${log.length ? '<canvas id="acct-chart"></canvas>' : '<div class="empty">No entries logged yet.</div>'}
+    ${log.length ? '<div class="chart-wrap"><canvas id="acct-chart"></canvas><div class="chart-tooltip" id="acct-chart-tooltip"></div></div>' : '<div class="empty">No entries logged yet.</div>'}
   </div>`;
 
   let historyCard = `<div class="card"><h2>History</h2>`;
@@ -1664,9 +1867,23 @@ function drawAccountChart(){
     ctx.arc(xAt(i), yAt(e.value), 3, 0, Math.PI*2);
     ctx.fill();
   });
+
+  const points = log.map((e,i)=>{
+    const prev = log[i-1];
+    const change = prev ? e.value - prev.value : null;
+    const changePct = prev && prev.value ? (change/prev.value)*100 : null;
+    const changeHtml = change!=null
+      ? `<div class="${change>=0?'':''}" style="color:${change>=0?'#3ddc97':'#ff6b6b'};">${change>=0?'+':''}$${fmt(Math.abs(change))} (${changePct>=0?'+':''}${fmt(changePct,1)}%)</div>`
+      : '';
+    return {
+      x: xAt(i), y: yAt(e.value),
+      html: `<div class="tt-title">${e.date}</div><div>$${fmt(e.value)}</div>${changeHtml}${e.notes?`<div class="tt-muted">${e.notes}</div>`:''}`
+    };
+  });
+  attachPointTooltip(canvas, document.getElementById('acct-chart-tooltip'), points);
 }
 
-function drawChart(pos, entries){
+function drawChart(pos, entries, peakSeries){
   const canvas = document.getElementById('chart');
   if(!canvas) return;
   const dpr = window.devicePixelRatio || 1;
@@ -1723,6 +1940,22 @@ function drawChart(pos, entries){
     ctx.arc(xAt(i), yAt(m), 3, 0, Math.PI*2);
     ctx.fill();
   });
+
+  const points = [];
+  entries.forEach((e,i)=>{
+    const m = computeMark(e.bid, e.ask);
+    if(m==null) return;
+    const ev = evaluate(pos, e, peakSeries ? peakSeries[i] : null);
+    points.push({
+      x: xAt(i), y: yAt(m),
+      html: `<div class="tt-title">${e.date} ${e.time||''}</div>
+        <div>Stock: ${e.stockPrice!=null?'$'+fmt(e.stockPrice):'—'}</div>
+        <div>Mark: $${fmt(m)}</div>
+        <div style="color:${ev.pnlPct!=null && ev.pnlPct>=0?'#3ddc97':'#ff6b6b'};">P&L: ${ev.pnlPct!=null?(ev.pnlPct>=0?'+':'')+fmt(ev.pnlPct,1)+'%':'—'}</div>
+        <div class="tt-muted">DTE: ${ev.dte}${e.iv!=null?' · IV '+fmt(e.iv,1)+'%':''}</div>`
+    });
+  });
+  attachPointTooltip(canvas, document.getElementById('chart-tooltip'), points);
 }
 
 loadState();
