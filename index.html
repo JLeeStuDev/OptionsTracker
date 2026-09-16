@@ -581,6 +581,11 @@ function render(){
   } else if(latestEval){
     const tpP = simIsCurrent ? priceFromPct(pos.entryPremium, sim.tp) : null;
     const slP = simIsCurrent ? priceFromPct(pos.entryPremium, sim.sl) : null;
+    // Peak/trough-based figures — the best/worst point reached at any point during the
+    // window, not just the terminal outcome. This is what the top "Suggested TP/SL" line
+    // uses, since it's the more realistic number for an actual sell-into-a-spike plan.
+    const ptTpP = simIsCurrent ? priceFromPct(pos.entryPremium, sim.likelyMaxReach) : null;
+    const ptSlP = simIsCurrent ? priceFromPct(pos.entryPremium, sim.likelyMinReach) : null;
 
     // Suggested TP/SL — the headline number, pulled straight from the last simulation run
     // (your actual logged data: stock price, vol, horizon, confidence). Everything else
@@ -590,9 +595,9 @@ function render(){
     if(simIsCurrent){
       suggestedLine = `<div class="adj-line" style="align-items:center;">
         <span class="adj-tag info">Suggested TP/SL</span>
-        <span class="adj-text"><strong style="color:var(--green);">$${fmt(tpP)}</strong> / <strong style="color:var(--red);">$${fmt(slP)}</strong>
-          — from your last simulation (${sim.band}% confidence, ${sim.horizonDays}d horizon, ${sim.volSourceLabel}).
-          <button class="ghost" style="margin-left:6px;padding:3px 9px;font-size:12px;" onclick="applySuggestedTargets('${pos.id}')">Apply</button></span>
+        <span class="adj-text"><strong style="color:var(--green);">$${fmt(ptTpP)}</strong> / <strong style="color:var(--red);">$${fmt(ptSlP)}</strong>
+          — likely peak/trough from your last simulation (${sim.band}% confidence, ${sim.horizonDays}d horizon, ${sim.volSourceLabel}).
+          <button class="ghost" style="margin-left:6px;padding:3px 9px;font-size:12px;" onclick="applyPeakTroughTargets('${pos.id}')">Apply</button></span>
       </div>`;
     } else if(sim && !sim.error){
       suggestedLine = `<div class="adj-line" style="align-items:center;">
@@ -1081,6 +1086,20 @@ async function applySuggestedTargets(posId){
   if(!result || result.error) return;
   state.positions[posId].tpPct = Math.round(result.tp);
   state.positions[posId].slPct = Math.round(result.sl);
+  await savePositions();
+  simCache[posId] = null;
+  render();
+}
+
+// Sets TP/SL from the likely peak/trough (best/worst point reached at any time during the
+// simulated window) rather than the terminal outcome — used by the top banner's Apply
+// button, kept distinct from applySuggestedTargets so the Predictive Targets card's own
+// "Apply — move TP to $X, SL to $Y" button (which still shows terminal figures) stays accurate.
+async function applyPeakTroughTargets(posId){
+  const result = simCache[posId];
+  if(!result || result.error) return;
+  state.positions[posId].tpPct = Math.round(result.likelyMaxReach);
+  state.positions[posId].slPct = Math.round(result.likelyMinReach);
   await savePositions();
   simCache[posId] = null;
   render();
