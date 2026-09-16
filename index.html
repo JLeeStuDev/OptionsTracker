@@ -581,34 +581,73 @@ function render(){
   } else if(latestEval){
     const tpP = simIsCurrent ? priceFromPct(pos.entryPremium, sim.tp) : null;
     const slP = simIsCurrent ? priceFromPct(pos.entryPremium, sim.sl) : null;
+
+    // Suggested TP/SL — the headline number, pulled straight from the last simulation run
+    // (your actual logged data: stock price, vol, horizon, confidence). Everything else
+    // that used to sit in the open banner (momentum read, IV context, trailing-stop status,
+    // decay math) now lives behind "Show details" below, so the top of the card stays clean.
+    let suggestedLine;
+    if(simIsCurrent){
+      suggestedLine = `<div class="adj-line" style="align-items:center;">
+        <span class="adj-tag info">Suggested TP/SL</span>
+        <span class="adj-text"><strong style="color:var(--green);">$${fmt(tpP)}</strong> / <strong style="color:var(--red);">$${fmt(slP)}</strong>
+          — from your last simulation (${sim.band}% confidence, ${sim.horizonDays}d horizon, ${sim.volSourceLabel}).
+          <button class="ghost" style="margin-left:6px;padding:3px 9px;font-size:12px;" onclick="applySuggestedTargets('${pos.id}')">Apply</button></span>
+      </div>`;
+    } else if(sim && !sim.error){
+      suggestedLine = `<div class="adj-line" style="align-items:center;">
+        <span class="adj-tag none">Suggested TP/SL</span>
+        <span class="adj-text">Your last simulation is from an earlier checkpoint.
+          <button class="ghost" style="margin-left:6px;padding:3px 9px;font-size:12px;" onclick="runSimulation('${pos.id}')">Re-run</button> to refresh it.</span>
+      </div>`;
+    } else if(latest && latest.stockPrice != null && (latest.iv != null || fallbackSigmaForTheta != null)){
+      suggestedLine = `<div class="adj-line" style="align-items:center;">
+        <span class="adj-tag none">Suggested TP/SL</span>
+        <span class="adj-text">No simulation run yet.
+          <button class="ghost" style="margin-left:6px;padding:3px 9px;font-size:12px;" onclick="runSimulation('${pos.id}')">Run simulation</button> to get one from your data.</span>
+      </div>`;
+    } else {
+      suggestedLine = `<div class="adj-line">
+        <span class="adj-tag none">Suggested TP/SL</span>
+        <span class="adj-text">Log a stock price and an implied vol (or paste historical closes below) to enable this.</span>
+      </div>`;
+    }
+
+    const detailsOpen = !!uiState.detailsOpen[pos.id];
     html += `<div class="banner ${latestEval.cls}">
       <div class="verdict">${latestEval.verdict}</div>
       <div class="detail">${latestEval.detail}${latestEval.note ? ' · ' + latestEval.note : ''}</div>
-      ${adj ? `<div class="adj-line">
-        <span class="adj-tag ${adj.tag}">${adj.tag==='raise'?'Consider raising TP':adj.tag==='tighten'?'Consider tightening SL':'No change suggested'}</span>
-        <span class="adj-text">${adj.text}</span>
-      </div>` : ''}
-      ${simIsCurrent ? `<div class="adj-line">
-        <span class="adj-tag info">Monte Carlo context</span>
-        <span class="adj-text">${fmt(sim.probProfit,0)}% odds of profit at day ${sim.horizonDays} (of ${sim.dte} to expiration), modeled range $${fmt(slP)}–$${fmt(tpP)}
-          at ${sim.band}% confidence using ${sim.volSourceLabel} (${fmt(sim.sigmaPct,1)}%). This is context, not a substitute
-          for the TP/SL rule above — see the Predictive Targets card for the full picture.</span>
-      </div>` : sim && !sim.error ? `<div class="adj-line">
-        <span class="adj-tag none">Monte Carlo context</span>
-        <span class="adj-text">Your last simulation is from an earlier checkpoint — re-run it in the Predictive Targets card below for a current read.</span>
-      </div>` : ''}
-      ${trailStatus ? `<div class="adj-line">
-        <span class="adj-tag ${latestEval.tagCls==='trail'?'trail':'info'}">Trailing stop</span>
-        <span class="adj-text">${trailStatus}</span>
-      </div>` : ''}
-      ${ivContext ? `<div class="adj-line">
-        <span class="adj-tag info">IV context</span>
-        <span class="adj-text">${ivContext}</span>
-      </div>` : ''}
-      ${decayText ? `<div class="adj-line">
-        <span class="adj-tag ${latestEval.decayTriggered ? 'trail' : 'info'}" style="${latestEval.decayTriggered ? 'background:#2a1414;color:var(--red);' : ''}">Theta / decay</span>
-        <span class="adj-text">${decayText}</span>
-      </div>` : ''}
+      ${suggestedLine}
+      <details ${detailsOpen?'open':''} ontoggle="uiState.detailsOpen['${pos.id}']=this.open" style="margin-top:8px;">
+        <summary style="cursor:pointer;color:var(--muted);font-size:12px;">Show details</summary>
+        <div style="margin-top:6px;">
+          ${adj ? `<div class="adj-line">
+            <span class="adj-tag ${adj.tag}">${adj.tag==='raise'?'Consider raising TP':adj.tag==='tighten'?'Consider tightening SL':'No change suggested'}</span>
+            <span class="adj-text">${adj.text}</span>
+          </div>` : ''}
+          ${simIsCurrent ? `<div class="adj-line">
+            <span class="adj-tag info">Monte Carlo context</span>
+            <span class="adj-text">${fmt(sim.probProfit,0)}% odds of profit at day ${sim.horizonDays} (of ${sim.dte} to expiration), modeled range $${fmt(slP)}–$${fmt(tpP)}
+              at ${sim.band}% confidence using ${sim.volSourceLabel} (${fmt(sim.sigmaPct,1)}%). This is context, not a substitute
+              for the TP/SL rule above — see the Predictive Targets card for the full picture.</span>
+          </div>` : sim && !sim.error ? `<div class="adj-line">
+            <span class="adj-tag none">Monte Carlo context</span>
+            <span class="adj-text">Your last simulation is from an earlier checkpoint — re-run it in the Predictive Targets card below for a current read.</span>
+          </div>` : ''}
+          ${trailStatus ? `<div class="adj-line">
+            <span class="adj-tag ${latestEval.tagCls==='trail'?'trail':'info'}">Trailing stop</span>
+            <span class="adj-text">${trailStatus}</span>
+          </div>` : ''}
+          ${ivContext ? `<div class="adj-line">
+            <span class="adj-tag info">IV context</span>
+            <span class="adj-text">${ivContext}</span>
+          </div>` : ''}
+          ${decayText ? `<div class="adj-line">
+            <span class="adj-tag ${latestEval.decayTriggered ? 'trail' : 'info'}" style="${latestEval.decayTriggered ? 'background:#2a1414;color:var(--red);' : ''}">Theta / decay</span>
+            <span class="adj-text">${decayText}</span>
+          </div>` : ''}
+        </div>
+      </details>
     </div>`;
   } else {
     html += `<div class="banner hold"><div class="verdict">No entries yet</div>
@@ -1002,6 +1041,7 @@ function computePredictiveTargets(pos, entry, confidenceBand, rfRatePct, nPaths,
 }
 
 let simCache = {}; // posId -> last computed sim result, transient (not persisted)
+let uiState = { detailsOpen: {} }; // posId -> whether the banner's "details" section is expanded, transient (not persisted)
 
 async function runSimulation(posId){
   const pos = state.positions[posId];
